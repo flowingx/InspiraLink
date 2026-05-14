@@ -11,7 +11,19 @@ python .\sleep_assist\app.py
 
 浏览器打开 `http://127.0.0.1:5000`。
 
-默认启用模拟硬件模式，便于无树莓派环境下演示。接入树莓派后可在 `sleep_assist/app.py` 中将 `simulate_hardware` 改为 `False`，并补齐 MAX30102 适配器。
+当前版本是 Phase 1 实测版：只测试 BMP280 压差、GPIO18 舵机和 GPIO27 LED。MAX30102/SpO2 暂未接入，代码不会生成假 SpO2 或假心率。
+
+如果 BMP280 读取失败，界面会显示错误，不会自动切换到模拟波形。
+
+## 模块测试
+
+```powershell
+python .\sleep_assist\app.py --test pressure
+python .\sleep_assist\app.py --test led
+python .\sleep_assist\app.py --test servo
+python .\sleep_assist\app.py --test all
+python .\sleep_assist\app.py --test routes
+```
 
 ## GPIO
 

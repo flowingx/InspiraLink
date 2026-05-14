@@ -14,7 +14,9 @@
 
 ## 项目简介
 
-灵息 / InspiraLink 是一个面向课程实践与半实物验证的睡眠呼吸监测和辅助呼吸演示系统。系统以 Raspberry Pi 为核心，通过 BMP280/AHT20 捕捉采样管内 Pa 级压差变化，通过 MAX30102 展示血氧和心率趋势，并使用舵机驱动简易球囊完成台架上的辅助泵气演示。
+灵息 / InspiraLink 是一个面向课程实践与半实物验证的睡眠呼吸监测和辅助呼吸演示系统。系统以 Raspberry Pi 为核心，通过 BMP280/AHT20 捕捉采样管内 Pa 级压差变化，并使用舵机驱动简易球囊完成台架上的辅助泵气演示。
+
+当前代码处于 **Phase 1：BMP280 压差 + 舵机 + LED 实测阶段**。MAX30102 还未接入，SpO2/心率相关代码已禁用，不生成假血氧数据，也不会用 SpO2 参与报警或控制。
 
 项目参考 `radar` 示例中的架构思想，采用“后台硬件线程 + Flask API + ECharts 实时仪表盘”的方式，将传感器数据、呼吸判定、舵机状态、报警信息和调试参数集中展示，便于实验记录和答辩演示。
 
@@ -30,7 +32,7 @@
 ## 核心功能
 
 - **Pa 级呼吸压差检测**：使用 BMP280 读取气压，结合滑动平均、基准漂移补偿和动态阈值检测吸气负压。
-- **多模态趋势监测**：使用 MAX30102 展示 SpO2 和心率趋势，作为报警和效果观察参考，不单独驱动泵气动作。
+- **SpO2 暂不接入**：MAX30102 到货前不显示假 SpO2/心率，不参与报警或控制。
 - **半实物辅助泵气演示**：使用 MG996R/SG90 舵机挤压简易呼吸球囊，完成台架上的同步泵气或看门狗泵气演示。
 - **安全互锁**：加入冷却时间、手动泵气次数限制、看门狗报警、传感器异常阻断和 LED 报警。
 - **Web 实时仪表盘**：通过 Flask + ECharts 展示压差波形、吸气阈值、呼吸状态、舵机状态、报警和事件日志。
@@ -50,10 +52,11 @@
 
 ## 快速运行
 
-默认启用模拟硬件模式，没有 Raspberry Pi 和传感器也可以打开仪表盘演示。
+请在 Raspberry Pi 的项目目录运行。当前版本默认读取真实 BMP280，并控制真实舵机和 LED；如果 BMP280 读取失败，界面会显示错误，不会生成模拟波形。
 
-```powershell
-python .\sleep_assist\app.py
+```bash
+cd /home/xzy/wk/InspiraLink
+python3 sleep_assist/app.py
 ```
 
 浏览器打开：
@@ -61,6 +64,30 @@ python .\sleep_assist\app.py
 ```text
 http://127.0.0.1:5000
 ```
+
+如果用手机热点局域网访问树莓派，请在同一网络下打开：
+
+```text
+http://10.176.40.66:5000
+```
+
+## 模块测试命令
+
+每个测试都只操作当前项目代码声明的硬件模块：
+
+```bash
+python3 sleep_assist/app.py --test pressure
+python3 sleep_assist/app.py --test led
+python3 sleep_assist/app.py --test servo
+python3 sleep_assist/app.py --test all
+python3 sleep_assist/app.py --test routes
+```
+
+- `pressure`：连续读取 BMP280，打印气压均值、范围和标准差。
+- `led`：闪烁 GPIO27 LED。
+- `servo`：让 GPIO18 舵机在复位角和压下角之间动作。
+- `all`：依次测试 BMP280、LED、舵机。
+- `routes`：只测试 Flask 路由，不访问硬件。
 
 ## 硬件连接
 

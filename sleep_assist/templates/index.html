@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>睡眠监测与辅助呼吸台架</title>
+    <title>灵息 Phase 1 硬件调试台架</title>
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
     <style>
         :root {
@@ -335,8 +335,8 @@
     <header>
         <div class="topbar">
             <div>
-                <h1>睡眠监测与辅助呼吸半实物验证台架</h1>
-                <div class="subtitle">仅用于课程台架演示；不连接真实人体气道，不作为医疗设备使用。</div>
+                <h1>灵息 Phase 1 硬件调试台架</h1>
+                <div class="subtitle">当前只测试 BMP280 压差 + 舵机 + LED；MAX30102/SpO2 未接入，不显示假数据。</div>
             </div>
             <div class="mode-badge">
                 当前模式
@@ -359,9 +359,9 @@
                     <span id="lastBreathValue">距上次 -- s</span>
                 </div>
                 <div class="metric">
-                    <label>SpO2</label>
-                    <strong id="spo2Value">--</strong>
-                    <span id="heartRateValue">心率 -- bpm</span>
+                    <label>MAX30102</label>
+                    <strong id="spo2Status">未接入</strong>
+                    <span>SpO2 已禁用</span>
                 </div>
                 <div class="metric">
                     <label>舵机</label>
@@ -405,10 +405,6 @@
                             <input id="watchdog_seconds" type="number" step="0.5">
                         </div>
                         <div class="field">
-                            <label for="spo2_alarm_threshold">SpO2 报警 %</label>
-                            <input id="spo2_alarm_threshold" type="number" step="1">
-                        </div>
-                        <div class="field">
                             <label for="servo_rest_angle">舵机复位角</label>
                             <input id="servo_rest_angle" type="number" step="1">
                         </div>
@@ -421,6 +417,7 @@
                         <button id="saveConfig">保存参数</button>
                         <button id="calibrate" class="secondary">重新校准</button>
                         <button id="pumpTest" class="warning">手动泵气测试</button>
+                        <button id="ledTest" class="secondary">LED 测试</button>
                         <button id="refreshConfig" class="secondary">读取参数</button>
                     </div>
                 </div>
@@ -452,7 +449,6 @@
             'min_inhale_delta_pa',
             'cooldown_seconds',
             'watchdog_seconds',
-            'spo2_alarm_threshold',
             'servo_rest_angle',
             'servo_press_angle'
         ];
@@ -533,13 +529,12 @@
         }
 
         function renderData(data) {
-            document.getElementById('modeValue').textContent = data.hardware.simulation ? '模拟台架' : data.mode;
+            document.getElementById('modeValue').textContent = data.mode || '--';
             document.getElementById('deltaValue').textContent = `${fmt(data.delta_pressure_pa)} Pa`;
             document.getElementById('thresholdValue').textContent = `阈值 ${fmt(data.effective_inhale_threshold_pa)} Pa`;
             document.getElementById('breathState').textContent = data.breath_state || '--';
             document.getElementById('lastBreathValue').textContent = `距上次 ${fmt(data.last_breath_age_s)} s`;
-            document.getElementById('spo2Value').textContent = data.spo2 ? `${fmt(data.spo2)}%` : '--';
-            document.getElementById('heartRateValue').textContent = `心率 ${data.heart_rate || '--'} bpm`;
+            document.getElementById('spo2Status').textContent = data.spo2_status || '未接入';
             document.getElementById('servoState').textContent = data.servo_state || '--';
             document.getElementById('pumpCountValue').textContent = `手动测试 ${data.pump_test_count || 0} 次`;
             document.getElementById('pressureValue').textContent = `当前气压 ${fmt(data.pressure_pa, 2)} Pa`;
@@ -614,6 +609,13 @@
             const button = event.currentTarget;
             setButtonBusy(button, true);
             await postJson('/pump_test');
+            setButtonBusy(button, false);
+        });
+
+        document.getElementById('ledTest').addEventListener('click', async event => {
+            const button = event.currentTarget;
+            setButtonBusy(button, true);
+            await postJson('/led_test', { seconds: 1 });
             setButtonBusy(button, false);
         });
 

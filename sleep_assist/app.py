@@ -1,5 +1,5 @@
-import math
-import random
+import argparse
+import json
 import statistics
 import threading
 import time
@@ -13,21 +13,18 @@ app = Flask(__name__)
 
 
 DEFAULT_CONFIG = {
-    "mode": "bench",
-    "simulate_hardware": True,
+    "mode": "pressure_servo_led",
     "sample_hz": 20,
-    "spo2_sample_hz": 5,
     "calibration_seconds": 10,
     "min_inhale_delta_pa": -5.0,
     "noise_sigma_multiplier": 3.0,
     "cooldown_seconds": 1.5,
-    "watchdog_seconds": 15.0,
+    "watchdog_seconds": 0.0,
     "servo_rest_angle": 30,
     "servo_press_angle": 105,
     "pump_hold_seconds": 0.55,
     "pump_cooldown_seconds": 3.0,
-    "pump_test_limit": 5,
-    "spo2_alarm_threshold": 92,
+    "pump_test_limit": 20,
 }
 
 GPIO_PINS = {
@@ -40,29 +37,33 @@ GPIO_PINS = {
 state_lock = threading.Lock()
 config_lock = threading.Lock()
 pump_lock = threading.Lock()
+monitor_thread_lock = threading.Lock()
 
 config = deepcopy(DEFAULT_CONFIG)
 
 system_state = {
     "pressure_pa": None,
     "baseline_pressure_pa": None,
-    "delta_pressure_pa": 0.0,
+    "delta_pressure_pa": None,
     "noise_sigma_pa": 0.0,
     "effective_inhale_threshold_pa": DEFAULT_CONFIG["min_inhale_delta_pa"],
-    "breath_state": "calibrating",
+    "breath_state": "starting",
     "last_breath_time": None,
     "last_breath_age_s": None,
     "resp_rate_est": None,
+    # Phase 1 only tests BMP280 pressure + servo + LED.
+    # MAX30102/SpO2 is intentionally disabled until the sensor is available.
     "spo2": None,
     "heart_rate": None,
+    "spo2_status": "disabled_not_connected",
     "servo_state": "idle",
     "mode": DEFAULT_CONFIG["mode"],
     "hardware": {
-        "simulation": True,
-        "pressure_sensor": "simulated",
-        "pulse_oximeter": "simulated",
-        "servo": "simulated",
-        "led": "simulated",
+        "simulation": False,
+        "pressure_sensor": "not initialized",
+        "pulse_oximeter": "disabled: MAX30102 not connected in Phase 1",
+        "servo": "not initialized",
+        "led": "not initialized",
         "gpio_pins": GPIO_PINS,
     },
     "alarms": [],
@@ -79,58 +80,24 @@ pressure_window = deque(maxlen=5)
 baseline_window = deque(maxlen=200)
 calibration_samples = []
 breath_times = deque(maxlen=8)
-event_history = deque(maxlen=80)
+event_history = deque(maxlen=100)
 pressure_history = deque(maxlen=400)
 stop_event = threading.Event()
 monitor_thread = None
-monitor_thread_lock = threading.Lock()
 
 servo_device = None
 led_device = None
 pressure_reader = None
-pulse_reader = None
-
-
-class SimulatedPressureReader:
-    def __init__(self):
-        self.start_time = time.time()
-        self.last_breath_center = time.time()
-        self.breath_interval = 5.0
-
-    def read_pa(self):
-        now = time.time()
-        base = 101_325.0 + 1.2 * math.sin((now - self.start_time) / 18.0)
-        noise = random.gauss(0.0, 0.45)
-
-        if now - self.last_breath_center >= self.breath_interval:
-            self.last_breath_center = now
-            self.breath_interval = random.uniform(4.0, 6.5)
-
-        phase = now - self.last_breath_center
-        inhale = -8.5 * math.exp(-((phase - 0.32) ** 2) / 0.028)
-
-        return base + noise + inhale
-
-
-class SimulatedPulseReader:
-    def __init__(self):
-        self.start_time = time.time()
-
-    def read(self):
-        elapsed = time.time() - self.start_time
-        spo2 = 97 + 0.8 * math.sin(elapsed / 14.0) + random.gauss(0, 0.25)
-        heart_rate = 76 + 4.0 * math.sin(elapsed / 10.0) + random.gauss(0, 0.8)
-        return round(max(88, min(100, spo2)), 1), int(max(45, min(140, heart_rate)))
 
 
 class HardwarePressureReader:
-    def __init__(self):
+    def __init__(self, address=0x76):
         import bme280
         import smbus2
 
         self.bme280 = bme280
         self.bus = smbus2.SMBus(1)
-        self.address = 0x76
+        self.address = address
         self.calibration = bme280.load_calibration_params(self.bus, self.address)
 
     def read_pa(self):
@@ -138,30 +105,15 @@ class HardwarePressureReader:
         return float(data.pressure) * 100.0
 
 
-class HardwarePulseReader:
-    def read(self):
-        # MAX30102 Python libraries vary by module. Keep this adapter explicit so
-        # teams can swap in their chosen library without changing Flask routes.
-        raise RuntimeError("MAX30102 adapter is not configured")
-
-
 def add_event(kind, message, level="info"):
-    item = {
-        "ts": round(time.time(), 3),
-        "kind": kind,
-        "level": level,
-        "message": message,
-    }
-    event_history.append(item)
-
-
-def set_led(active):
-    if led_device is None:
-        return
-    try:
-        led_device.on() if active else led_device.off()
-    except Exception as exc:
-        add_event("led_error", f"LED control failed: {exc}", "warning")
+    event_history.append(
+        {
+            "ts": round(time.time(), 3),
+            "kind": kind,
+            "level": level,
+            "message": message,
+        }
+    )
 
 
 def safe_config():
@@ -174,66 +126,90 @@ def update_state(**kwargs):
         system_state.update(kwargs)
 
 
+def add_alarm(alarm):
+    with state_lock:
+        alarms = set(system_state["alarms"])
+        alarms.add(alarm)
+        system_state["alarms"] = sorted(alarms)
+
+
+def clear_alarm(alarm):
+    with state_lock:
+        alarms = set(system_state["alarms"])
+        alarms.discard(alarm)
+        system_state["alarms"] = sorted(alarms)
+
+
 def refresh_derived_history():
     with state_lock:
         system_state["history"]["pressure"] = list(pressure_history)
         system_state["history"]["events"] = list(event_history)
 
 
+def init_gpio():
+    from gpiozero import AngularServo, Device, LED
+    from gpiozero.pins.pigpio import PiGPIOFactory
+
+    Device.pin_factory = PiGPIOFactory()
+    led = LED(GPIO_PINS["led"])
+    servo = AngularServo(
+        GPIO_PINS["servo"],
+        min_angle=0,
+        max_angle=180,
+        min_pulse_width=0.0005,
+        max_pulse_width=0.0025,
+    )
+    return led, servo
+
+
 def init_hardware():
-    global led_device, pressure_reader, pulse_reader, servo_device
+    global led_device, pressure_reader, servo_device
 
     cfg = safe_config()
-    if cfg["simulate_hardware"]:
-        pressure_reader = SimulatedPressureReader()
-        pulse_reader = SimulatedPulseReader()
-        add_event("hardware", "Simulation mode enabled; hardware adapters are bypassed.")
-        return
-
     try:
-        from gpiozero import AngularServo, Device, LED
-        from gpiozero.pins.pigpio import PiGPIOFactory
-
-        Device.pin_factory = PiGPIOFactory()
-        led_device = LED(GPIO_PINS["led"])
-        servo_device = AngularServo(
-            GPIO_PINS["servo"],
-            min_angle=0,
-            max_angle=180,
-            min_pulse_width=0.0005,
-            max_pulse_width=0.0025,
-        )
+        led_device, servo_device = init_gpio()
         servo_device.angle = cfg["servo_rest_angle"]
         pressure_reader = HardwarePressureReader()
-        pulse_reader = HardwarePulseReader()
-
-        with state_lock:
-            system_state["hardware"].update(
-                {
-                    "simulation": False,
-                    "pressure_sensor": "BMP280/AHT20 on I2C",
-                    "pulse_oximeter": "MAX30102 adapter placeholder",
-                    "servo": "GPIO18 AngularServo",
-                    "led": "GPIO27 LED",
-                }
-            )
-        add_event("hardware", "Hardware mode initialized.")
     except Exception as exc:
-        pressure_reader = SimulatedPressureReader()
-        pulse_reader = SimulatedPulseReader()
-        with state_lock:
-            system_state["hardware"].update(
-                {
-                    "simulation": True,
-                    "pressure_sensor": "simulated fallback",
-                    "pulse_oximeter": "simulated fallback",
-                    "servo": "simulated fallback",
-                    "led": "simulated fallback",
-                }
-            )
-        with config_lock:
-            config["simulate_hardware"] = True
-        add_event("hardware_error", f"Hardware init failed; using simulation: {exc}", "warning")
+        add_alarm("hardware_init_error")
+        update_state(
+            breath_state="hardware_error",
+            hardware={
+                "simulation": False,
+                "pressure_sensor": f"init failed: {exc}",
+                "pulse_oximeter": "disabled: MAX30102 not connected in Phase 1",
+                "servo": f"init failed: {exc}",
+                "led": f"init failed: {exc}",
+                "gpio_pins": GPIO_PINS,
+            },
+        )
+        add_event("hardware_error", f"Hardware init failed: {exc}", "error")
+        return False
+
+    update_state(
+        hardware={
+            "simulation": False,
+            "pressure_sensor": "BMP280/AHT20 on I2C bus 1, address 0x76",
+            "pulse_oximeter": "disabled: MAX30102 not connected in Phase 1",
+            "servo": f"GPIO{GPIO_PINS['servo']} AngularServo",
+            "led": f"GPIO{GPIO_PINS['led']} LED",
+            "gpio_pins": GPIO_PINS,
+        },
+        breath_state="calibrating",
+    )
+    clear_alarm("hardware_init_error")
+    add_event("hardware", "BMP280, servo, and LED initialized. SpO2 is disabled.")
+    return True
+
+
+def set_led(active):
+    if led_device is None:
+        return
+    try:
+        led_device.on() if active else led_device.off()
+    except Exception as exc:
+        add_alarm("led_error")
+        add_event("led_error", f"LED control failed: {exc}", "warning")
 
 
 def current_effective_threshold(cfg):
@@ -251,8 +227,9 @@ def reset_calibration():
         system_state["baseline_pressure_pa"] = None
         system_state["noise_sigma_pa"] = 0.0
         system_state["breath_state"] = "calibrating"
-        system_state["alarms"] = []
-    add_event("calibration", "Calibration restarted; keep the sampling tube still.")
+        system_state["last_breath_time"] = None
+        system_state["last_breath_age_s"] = None
+    add_event("calibration", "Calibration restarted; keep the pressure tube still.")
 
 
 def calculate_resp_rate():
@@ -281,27 +258,24 @@ def execute_pump(reason="manual"):
             return False, "pump already running"
         if now - last_pump < cfg["pump_cooldown_seconds"]:
             return False, "pump cooldown active"
-        if any(alarm in alarms for alarm in ["sensor_error", "servo_error", "power_error"]):
-            return False, "safety alarm blocks automatic pumping"
+        if "servo_error" in alarms or "hardware_init_error" in alarms:
+            return False, "servo or hardware alarm blocks pumping"
 
         update_state(servo_state="pumping", last_pump_time=now)
         add_event("pump", f"Pump action started ({reason}).", "warning")
 
         try:
-            if servo_device is not None:
-                servo_device.angle = cfg["servo_press_angle"]
+            if servo_device is None:
+                raise RuntimeError("servo is not initialized")
+            servo_device.angle = cfg["servo_press_angle"]
             time.sleep(cfg["pump_hold_seconds"])
-            if servo_device is not None:
-                servo_device.angle = cfg["servo_rest_angle"]
+            servo_device.angle = cfg["servo_rest_angle"]
             update_state(servo_state="idle")
             add_event("pump", "Pump action completed.")
             return True, "pump completed"
         except Exception as exc:
-            with state_lock:
-                alarms = set(system_state["alarms"])
-                alarms.add("servo_error")
-                system_state["alarms"] = sorted(alarms)
-                system_state["servo_state"] = "error"
+            add_alarm("servo_error")
+            update_state(servo_state="error")
             set_led(True)
             add_event("servo_error", f"Servo action failed: {exc}", "error")
             return False, str(exc)
@@ -319,53 +293,46 @@ def maybe_trigger_breath(delta_pa, now, cfg):
 
     if inhaling:
         breath_times.append(now)
-        with state_lock:
-            system_state["last_breath_time"] = now
-            system_state["last_breath_age_s"] = 0.0
-            system_state["resp_rate_est"] = calculate_resp_rate()
-            system_state["breath_state"] = "inhale_detected"
+        update_state(
+            last_breath_time=now,
+            last_breath_age_s=0.0,
+            resp_rate_est=calculate_resp_rate(),
+            breath_state="inhale_detected",
+        )
+        set_led(True)
         add_event("breath", f"Inhale detected at {delta_pa:.1f} Pa.")
         threading.Thread(target=execute_pump, args=("breath_sync",), daemon=True).start()
     elif breath_state == "inhale_detected" and recovered:
+        set_led(False)
         update_state(breath_state="monitoring")
 
-    with state_lock:
-        system_state["effective_inhale_threshold_pa"] = round(threshold, 2)
+    update_state(effective_inhale_threshold_pa=round(threshold, 2))
 
 
-def update_alarms(now, cfg):
-    alarms = set()
+def update_watchdog(now, cfg):
+    if cfg["watchdog_seconds"] <= 0:
+        clear_alarm("apnea_watchdog")
+        return
+
     with state_lock:
         last_breath = system_state["last_breath_time"]
-        spo2 = system_state["spo2"]
 
     if last_breath is not None and now - last_breath > cfg["watchdog_seconds"]:
-        alarms.add("apnea_watchdog")
-    if spo2 is not None and spo2 < cfg["spo2_alarm_threshold"]:
-        alarms.add("low_spo2")
-
-    with state_lock:
-        existing_blocking = {
-            alarm
-            for alarm in system_state["alarms"]
-            if alarm in {"sensor_error", "servo_error", "power_error"}
-        }
-        system_state["alarms"] = sorted(alarms | existing_blocking)
-        active_alarms = list(system_state["alarms"])
-
-    set_led(bool(active_alarms))
-
-    if "apnea_watchdog" in alarms:
-        add_event("watchdog", "No valid breath detected; bench pump demonstration requested.", "warning")
-        threading.Thread(target=execute_pump, args=("watchdog",), daemon=True).start()
+        add_alarm("apnea_watchdog")
+        set_led(True)
+        add_event("watchdog", "No valid breath detected; watchdog alarm raised.", "warning")
         with state_lock:
             system_state["last_breath_time"] = now
+    else:
+        clear_alarm("apnea_watchdog")
 
 
 def monitor_loop():
-    init_hardware()
-    add_event("system", "Monitor thread started.")
-    next_pulse_read = 0.0
+    if not init_hardware():
+        refresh_derived_history()
+        return
+
+    add_event("system", "Monitor thread started for BMP280 + servo + LED.")
 
     while not stop_event.is_set():
         cfg = safe_config()
@@ -377,11 +344,16 @@ def monitor_loop():
             pressure_window.append(raw_pressure)
             filtered_pressure = sum(pressure_window) / len(pressure_window)
             baseline_window.append(filtered_pressure)
+            clear_alarm("pressure_sensor_error")
 
             if len(calibration_samples) < int(cfg["calibration_seconds"] * cfg["sample_hz"]):
                 calibration_samples.append(filtered_pressure)
                 baseline = sum(calibration_samples) / len(calibration_samples)
-                sigma = statistics.pstdev(calibration_samples) if len(calibration_samples) > 1 else 0.0
+                sigma = (
+                    statistics.pstdev(calibration_samples)
+                    if len(calibration_samples) > 1
+                    else 0.0
+                )
                 breath_state = "calibrating"
             else:
                 if len(calibration_samples) == int(cfg["calibration_seconds"] * cfg["sample_hz"]):
@@ -415,34 +387,20 @@ def monitor_loop():
                         else None,
                     }
                 )
-                if system_state["breath_state"] == "calibrating":
+                if system_state["breath_state"] in {"starting", "calibrating"}:
                     system_state["breath_state"] = breath_state
 
             if breath_state == "monitoring":
                 maybe_trigger_breath(delta, now, cfg)
-                update_alarms(now, cfg)
-
-            if now >= next_pulse_read:
-                try:
-                    spo2, heart_rate = pulse_reader.read()
-                    update_state(spo2=spo2, heart_rate=heart_rate)
-                except Exception as exc:
-                    with state_lock:
-                        alarms = set(system_state["alarms"])
-                        alarms.add("sensor_error")
-                        system_state["alarms"] = sorted(alarms)
-                    add_event("sensor_error", f"Pulse reader failed: {exc}", "warning")
-                next_pulse_read = now + 1.0 / max(1, cfg["spo2_sample_hz"])
+                update_watchdog(now, cfg)
 
             refresh_derived_history()
         except Exception as exc:
-            with state_lock:
-                alarms = set(system_state["alarms"])
-                alarms.add("sensor_error")
-                system_state["alarms"] = sorted(alarms)
-                system_state["breath_state"] = "sensor_error"
+            add_alarm("pressure_sensor_error")
+            update_state(breath_state="pressure_sensor_error")
             set_led(True)
-            add_event("sensor_error", f"Pressure monitor failed: {exc}", "error")
+            add_event("pressure_sensor_error", f"BMP280 read failed: {exc}", "error")
+            refresh_derived_history()
             time.sleep(1.0)
 
         elapsed = time.time() - start
@@ -476,7 +434,6 @@ def config_route():
         "servo_press_angle": int,
         "pump_hold_seconds": float,
         "pump_cooldown_seconds": float,
-        "spo2_alarm_threshold": int,
     }
 
     with config_lock:
@@ -502,8 +459,8 @@ def pump_test():
         count = system_state["pump_test_count"]
         mode = system_state["mode"]
 
-    if mode not in {"bench", "debug"}:
-        return jsonify({"ok": False, "message": "pump test only allowed in bench/debug mode"}), 403
+    if mode != "pressure_servo_led":
+        return jsonify({"ok": False, "message": "pump test only allowed in Phase 1 mode"}), 403
     if count >= cfg["pump_test_limit"]:
         return jsonify({"ok": False, "message": "pump test limit reached"}), 429
 
@@ -512,6 +469,19 @@ def pump_test():
         with state_lock:
             system_state["pump_test_count"] += 1
     return jsonify({"ok": ok, "message": message})
+
+
+@app.route("/led_test", methods=["POST"])
+def led_test():
+    seconds = float((request.get_json(silent=True) or {}).get("seconds", 1.0))
+    try:
+        set_led(True)
+        time.sleep(max(0.1, min(seconds, 5.0)))
+        set_led(False)
+        add_event("led", "LED test completed.")
+        return jsonify({"ok": True, "message": "led test completed"})
+    except Exception as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 500
 
 
 @app.route("/logs")
@@ -529,6 +499,92 @@ def start_background_threads():
         return monitor_thread
 
 
+def test_pressure_sensor(samples=20, delay=0.1):
+    reader = HardwarePressureReader()
+    values = []
+    for _ in range(samples):
+        pressure = reader.read_pa()
+        values.append(pressure)
+        print(f"pressure_pa={pressure:.2f}")
+        time.sleep(delay)
+    print(
+        json.dumps(
+            {
+                "samples": len(values),
+                "min_pa": round(min(values), 2),
+                "max_pa": round(max(values), 2),
+                "mean_pa": round(sum(values) / len(values), 2),
+                "sigma_pa": round(statistics.pstdev(values), 3) if len(values) > 1 else 0.0,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+
+def test_led(cycles=3, on_seconds=0.5):
+    led, _ = init_gpio()
+    try:
+        for idx in range(cycles):
+            print(f"LED on ({idx + 1}/{cycles})")
+            led.on()
+            time.sleep(on_seconds)
+            print(f"LED off ({idx + 1}/{cycles})")
+            led.off()
+            time.sleep(on_seconds)
+    finally:
+        led.off()
+
+
+def test_servo(rest_angle=30, press_angle=105, hold_seconds=0.6, cycles=3):
+    _, servo = init_gpio()
+    try:
+        servo.angle = rest_angle
+        time.sleep(0.5)
+        for idx in range(cycles):
+            print(f"servo press {press_angle} deg ({idx + 1}/{cycles})")
+            servo.angle = press_angle
+            time.sleep(hold_seconds)
+            print(f"servo rest {rest_angle} deg ({idx + 1}/{cycles})")
+            servo.angle = rest_angle
+            time.sleep(1.0)
+    finally:
+        servo.angle = rest_angle
+
+
+def test_routes():
+    client = app.test_client()
+    print("GET /config", client.get("/config").status_code)
+    print("GET /data", client.get("/data").status_code)
+    print("GET /logs", client.get("/logs").status_code)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="InspiraLink Phase 1 hardware runner")
+    parser.add_argument(
+        "--test",
+        choices=["pressure", "led", "servo", "all", "routes"],
+        help="run one hardware/module test and exit",
+    )
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=5000)
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    start_background_threads()
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    args = parse_args()
+    if args.test == "pressure":
+        test_pressure_sensor()
+    elif args.test == "led":
+        test_led()
+    elif args.test == "servo":
+        test_servo()
+    elif args.test == "all":
+        test_pressure_sensor()
+        test_led()
+        test_servo()
+    elif args.test == "routes":
+        test_routes()
+    else:
+        start_background_threads()
+        app.run(host=args.host, port=args.port, debug=False)
