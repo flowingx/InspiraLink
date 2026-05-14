@@ -13,6 +13,8 @@ python .\sleep_assist\app.py
 
 当前版本是 Phase 1 实测版：只测试 BMP280 压差、GPIO18 舵机和 GPIO27 LED。MAX30102/SpO2 暂未接入，代码不会生成假 SpO2 或假心率。
 
+默认 `assist_mode` 为 `apnea_only`：正常呼吸只记录并重置看门狗，不泵气；超过看门狗时间没有检测到有效呼吸时才泵气。
+
 如果 BMP280 读取失败，界面会显示错误，不会自动切换到模拟波形。
 
 ## 模块测试

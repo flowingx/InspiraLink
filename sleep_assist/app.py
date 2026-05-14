@@ -14,12 +14,13 @@ app = Flask(__name__)
 
 DEFAULT_CONFIG = {
     "mode": "pressure_servo_led",
+    "assist_mode": "apnea_only",
     "sample_hz": 20,
     "calibration_seconds": 10,
     "min_inhale_delta_pa": -5.0,
     "noise_sigma_multiplier": 3.0,
     "cooldown_seconds": 1.5,
-    "watchdog_seconds": 0.0,
+    "watchdog_seconds": 10.0,
     "servo_rest_angle": 30,
     "servo_press_angle": 105,
     "pump_hold_seconds": 0.55,
@@ -58,6 +59,7 @@ system_state = {
     "spo2_status": "disabled_not_connected",
     "servo_state": "idle",
     "mode": DEFAULT_CONFIG["mode"],
+    "assist_mode": DEFAULT_CONFIG["assist_mode"],
     "hardware": {
         "simulation": False,
         "pressure_sensor": "not initialized",
@@ -305,6 +307,7 @@ def reset_calibration():
         system_state["breath_state"] = "calibrating"
         system_state["last_breath_time"] = None
         system_state["last_breath_age_s"] = None
+        system_state["assist_mode"] = safe_config()["assist_mode"]
     add_event("calibration", "Calibration restarted; keep the pressure tube still.")
 
 
@@ -376,8 +379,9 @@ def maybe_trigger_breath(delta_pa, now, cfg):
             breath_state="inhale_detected",
         )
         set_led(True)
-        add_event("breath", f"Inhale detected at {delta_pa:.1f} Pa.")
-        threading.Thread(target=execute_pump, args=("breath_sync",), daemon=True).start()
+        add_event("breath", f"Inhale detected at {delta_pa:.1f} Pa; watchdog timer reset.")
+        if cfg["assist_mode"] == "sync":
+            threading.Thread(target=execute_pump, args=("breath_sync",), daemon=True).start()
     elif breath_state == "inhale_detected" and recovered:
         set_led(False)
         update_state(breath_state="monitoring")
@@ -396,7 +400,8 @@ def update_watchdog(now, cfg):
     if last_breath is not None and now - last_breath > cfg["watchdog_seconds"]:
         add_alarm("apnea_watchdog")
         set_led(True)
-        add_event("watchdog", "No valid breath detected; watchdog alarm raised.", "warning")
+        add_event("watchdog", "No valid breath detected; apnea-only pump requested.", "warning")
+        threading.Thread(target=execute_pump, args=("apnea_watchdog",), daemon=True).start()
         with state_lock:
             system_state["last_breath_time"] = now
     else:
@@ -435,6 +440,9 @@ def monitor_loop():
                 if len(calibration_samples) == int(cfg["calibration_seconds"] * cfg["sample_hz"]):
                     add_event("calibration", "Calibration completed.")
                     calibration_samples.append(filtered_pressure)
+                    with state_lock:
+                        system_state["last_breath_time"] = now
+                        system_state["last_breath_age_s"] = 0.0
                 baseline = sum(baseline_window) / len(baseline_window)
                 sigma = statistics.pstdev(list(baseline_window)) if len(baseline_window) > 1 else 0.0
                 breath_state = "monitoring"
@@ -458,6 +466,7 @@ def monitor_loop():
                         "delta_pressure_pa": round(delta, 2),
                         "noise_sigma_pa": round(sigma, 2),
                         "mode": cfg["mode"],
+                        "assist_mode": cfg["assist_mode"],
                         "last_breath_age_s": round(now - last_breath, 1)
                         if last_breath is not None
                         else None,
@@ -503,6 +512,7 @@ def config_route():
     updates = request.get_json(silent=True) or {}
     allowed = {
         "min_inhale_delta_pa": float,
+        "assist_mode": str,
         "noise_sigma_multiplier": float,
         "cooldown_seconds": float,
         "watchdog_seconds": float,

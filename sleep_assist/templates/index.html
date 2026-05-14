@@ -336,7 +336,7 @@
         <div class="topbar">
             <div>
                 <h1>灵息 Phase 1 硬件调试台架</h1>
-                <div class="subtitle">当前只测试 BMP280 压差 + 舵机 + LED；MAX30102/SpO2 未接入，不显示假数据。</div>
+                <div class="subtitle">当前只测试 BMP280 压差 + 舵机 + LED；默认正常呼吸只记录，无呼吸超时才泵气。</div>
             </div>
             <div class="mode-badge">
                 当前模式
@@ -533,7 +533,7 @@
             document.getElementById('deltaValue').textContent = `${fmt(data.delta_pressure_pa)} Pa`;
             document.getElementById('thresholdValue').textContent = `阈值 ${fmt(data.effective_inhale_threshold_pa)} Pa`;
             document.getElementById('breathState').textContent = data.breath_state || '--';
-            document.getElementById('lastBreathValue').textContent = `距上次 ${fmt(data.last_breath_age_s)} s`;
+            document.getElementById('lastBreathValue').textContent = `${data.assist_mode || '--'} · 距上次 ${fmt(data.last_breath_age_s)} s`;
             document.getElementById('spo2Status').textContent = data.spo2_status || '未接入';
             document.getElementById('servoState').textContent = data.servo_state || '--';
             document.getElementById('pumpCountValue').textContent = `手动测试 ${data.pump_test_count || 0} 次`;
