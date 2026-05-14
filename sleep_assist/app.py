@@ -20,7 +20,9 @@ DEFAULT_CONFIG = {
     "min_inhale_delta_pa": -5.0,
     "noise_sigma_multiplier": 3.0,
     "cooldown_seconds": 1.5,
-    "watchdog_seconds": 10.0,
+    "apnea_detect_seconds": 5.0,
+    "assist_interval_seconds": 3.0,
+    "pump_artifact_ignore_seconds": 1.2,
     "servo_rest_angle": 30,
     "servo_press_angle": 105,
     "pump_hold_seconds": 0.55,
@@ -52,6 +54,9 @@ system_state = {
     "last_breath_time": None,
     "last_breath_age_s": None,
     "resp_rate_est": None,
+    "apnea_active": False,
+    "last_assist_time": None,
+    "ignore_pressure_until": 0.0,
     # Phase 1 only tests BMP280 pressure + servo + LED.
     # MAX30102/SpO2 is intentionally disabled until the sensor is available.
     "spo2": None,
@@ -308,6 +313,10 @@ def reset_calibration():
         system_state["last_breath_time"] = None
         system_state["last_breath_age_s"] = None
         system_state["assist_mode"] = safe_config()["assist_mode"]
+        system_state["apnea_active"] = False
+        system_state["last_assist_time"] = None
+        system_state["ignore_pressure_until"] = 0.0
+    clear_alarm("apnea_watchdog")
     add_event("calibration", "Calibration restarted; keep the pressure tube still.")
 
 
@@ -349,7 +358,11 @@ def execute_pump(reason="manual"):
             servo_device.angle = cfg["servo_press_angle"]
             time.sleep(cfg["pump_hold_seconds"])
             servo_device.angle = cfg["servo_rest_angle"]
-            update_state(servo_state="idle")
+            update_state(
+                servo_state="idle",
+                last_assist_time=now,
+                ignore_pressure_until=time.time() + cfg["pump_artifact_ignore_seconds"],
+            )
             add_event("pump", "Pump action completed.")
             return True, "pump completed"
         except Exception as exc:
@@ -361,6 +374,12 @@ def execute_pump(reason="manual"):
 
 
 def maybe_trigger_breath(delta_pa, now, cfg):
+    with state_lock:
+        ignore_pressure_until = system_state["ignore_pressure_until"]
+    if now < ignore_pressure_until:
+        update_state(breath_state="pump_artifact_ignored")
+        return
+
     threshold = current_effective_threshold(cfg)
     with state_lock:
         last_breath = system_state["last_breath_time"]
@@ -377,9 +396,11 @@ def maybe_trigger_breath(delta_pa, now, cfg):
             last_breath_age_s=0.0,
             resp_rate_est=calculate_resp_rate(),
             breath_state="inhale_detected",
+            apnea_active=False,
         )
+        clear_alarm("apnea_watchdog")
         set_led(True)
-        add_event("breath", f"Inhale detected at {delta_pa:.1f} Pa; watchdog timer reset.")
+        add_event("breath", f"Inhale detected at {delta_pa:.1f} Pa; apnea alarm cleared.")
         if cfg["assist_mode"] == "sync":
             threading.Thread(target=execute_pump, args=("breath_sync",), daemon=True).start()
     elif breath_state == "inhale_detected" and recovered:
@@ -389,23 +410,31 @@ def maybe_trigger_breath(delta_pa, now, cfg):
     update_state(effective_inhale_threshold_pa=round(threshold, 2))
 
 
-def update_watchdog(now, cfg):
-    if cfg["watchdog_seconds"] <= 0:
+def update_apnea_control(now, cfg):
+    if cfg["apnea_detect_seconds"] <= 0:
         clear_alarm("apnea_watchdog")
         return
 
     with state_lock:
         last_breath = system_state["last_breath_time"]
+        last_assist = system_state["last_assist_time"]
+        apnea_active = system_state["apnea_active"]
 
-    if last_breath is not None and now - last_breath > cfg["watchdog_seconds"]:
+    if last_breath is not None and now - last_breath > cfg["apnea_detect_seconds"]:
         add_alarm("apnea_watchdog")
         set_led(True)
-        add_event("watchdog", "No valid breath detected; apnea-only pump requested.", "warning")
-        threading.Thread(target=execute_pump, args=("apnea_watchdog",), daemon=True).start()
-        with state_lock:
-            system_state["last_breath_time"] = now
+        if not apnea_active:
+            update_state(apnea_active=True, breath_state="apnea")
+            add_event("apnea", "No valid breath detected; apnea alarm is active.", "warning")
+
+        interval_ok = last_assist is None or now - last_assist >= cfg["assist_interval_seconds"]
+        if interval_ok:
+            add_event("assist", "Apnea assist pump requested.", "warning")
+            threading.Thread(target=execute_pump, args=("apnea_assist",), daemon=True).start()
     else:
         clear_alarm("apnea_watchdog")
+        if apnea_active:
+            update_state(apnea_active=False)
 
 
 def monitor_loop():
@@ -477,7 +506,7 @@ def monitor_loop():
 
             if breath_state == "monitoring":
                 maybe_trigger_breath(delta, now, cfg)
-                update_watchdog(now, cfg)
+                update_apnea_control(now, cfg)
 
             refresh_derived_history()
         except Exception as exc:
@@ -515,7 +544,9 @@ def config_route():
         "assist_mode": str,
         "noise_sigma_multiplier": float,
         "cooldown_seconds": float,
-        "watchdog_seconds": float,
+        "apnea_detect_seconds": float,
+        "assist_interval_seconds": float,
+        "pump_artifact_ignore_seconds": float,
         "servo_rest_angle": int,
         "servo_press_angle": int,
         "pump_hold_seconds": float,
