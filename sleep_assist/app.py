@@ -17,12 +17,12 @@ DEFAULT_CONFIG = {
     "assist_mode": "apnea_only",
     "sample_hz": 20,
     "calibration_seconds": 10,
-    "min_inhale_delta_pa": -5.0,
+    "min_breath_activity_pa": 3.0,
     "noise_sigma_multiplier": 3.0,
     "cooldown_seconds": 1.5,
     "apnea_detect_seconds": 5.0,
     "assist_interval_seconds": 3.0,
-    "pump_artifact_ignore_seconds": 1.2,
+    "pump_artifact_ignore_seconds": 2.0,
     "servo_rest_angle": 30,
     "servo_press_angle": 105,
     "pump_hold_seconds": 0.55,
@@ -49,7 +49,9 @@ system_state = {
     "baseline_pressure_pa": None,
     "delta_pressure_pa": None,
     "noise_sigma_pa": 0.0,
-    "effective_inhale_threshold_pa": DEFAULT_CONFIG["min_inhale_delta_pa"],
+    "calibration_noise_sigma_pa": 0.0,
+    "effective_breath_threshold_pa": DEFAULT_CONFIG["min_breath_activity_pa"],
+    "effective_inhale_threshold_pa": -DEFAULT_CONFIG["min_breath_activity_pa"],
     "breath_state": "starting",
     "last_breath_time": None,
     "last_breath_age_s": None,
@@ -297,9 +299,9 @@ def set_led(active):
 
 def current_effective_threshold(cfg):
     with state_lock:
-        sigma = system_state["noise_sigma_pa"]
-    adaptive = -abs(cfg["noise_sigma_multiplier"] * sigma)
-    return min(float(cfg["min_inhale_delta_pa"]), adaptive)
+        sigma = system_state["calibration_noise_sigma_pa"]
+    adaptive = abs(cfg["noise_sigma_multiplier"] * sigma)
+    return max(float(cfg["min_breath_activity_pa"]), adaptive)
 
 
 def reset_calibration():
@@ -309,6 +311,7 @@ def reset_calibration():
     with state_lock:
         system_state["baseline_pressure_pa"] = None
         system_state["noise_sigma_pa"] = 0.0
+        system_state["calibration_noise_sigma_pa"] = 0.0
         system_state["breath_state"] = "calibrating"
         system_state["last_breath_time"] = None
         system_state["last_breath_age_s"] = None
@@ -373,7 +376,7 @@ def execute_pump(reason="manual"):
             return False, str(exc)
 
 
-def maybe_trigger_breath(delta_pa, now, cfg):
+def maybe_detect_breath_activity(delta_pa, now, cfg):
     with state_lock:
         ignore_pressure_until = system_state["ignore_pressure_until"]
     if now < ignore_pressure_until:
@@ -386,28 +389,35 @@ def maybe_trigger_breath(delta_pa, now, cfg):
         breath_state = system_state["breath_state"]
 
     cooldown_ok = last_breath is None or now - last_breath >= cfg["cooldown_seconds"]
-    inhaling = delta_pa <= threshold and cooldown_ok
-    recovered = delta_pa > threshold * 0.45
+    active_breath = abs(delta_pa) >= threshold and cooldown_ok
+    recovered = abs(delta_pa) < threshold * 0.45
 
-    if inhaling:
+    if active_breath:
         breath_times.append(now)
+        direction = "negative" if delta_pa < 0 else "positive"
         update_state(
             last_breath_time=now,
             last_breath_age_s=0.0,
             resp_rate_est=calculate_resp_rate(),
-            breath_state="inhale_detected",
+            breath_state="breath_activity",
             apnea_active=False,
         )
         clear_alarm("apnea_watchdog")
         set_led(True)
-        add_event("breath", f"Inhale detected at {delta_pa:.1f} Pa; apnea alarm cleared.")
+        add_event(
+            "breath",
+            f"Breath activity detected ({direction}, {delta_pa:.1f} Pa); apnea alarm cleared.",
+        )
         if cfg["assist_mode"] == "sync":
             threading.Thread(target=execute_pump, args=("breath_sync",), daemon=True).start()
-    elif breath_state == "inhale_detected" and recovered:
+    elif breath_state == "breath_activity" and recovered:
         set_led(False)
         update_state(breath_state="monitoring")
 
-    update_state(effective_inhale_threshold_pa=round(threshold, 2))
+    update_state(
+        effective_breath_threshold_pa=round(threshold, 2),
+        effective_inhale_threshold_pa=round(-threshold, 2),
+    )
 
 
 def update_apnea_control(now, cfg):
@@ -453,10 +463,10 @@ def monitor_loop():
             raw_pressure = pressure_reader.read_pa()
             pressure_window.append(raw_pressure)
             filtered_pressure = sum(pressure_window) / len(pressure_window)
-            baseline_window.append(filtered_pressure)
             clear_alarm("pressure_sensor_error")
 
             if len(calibration_samples) < int(cfg["calibration_seconds"] * cfg["sample_hz"]):
+                baseline_window.append(filtered_pressure)
                 calibration_samples.append(filtered_pressure)
                 baseline = sum(calibration_samples) / len(calibration_samples)
                 sigma = (
@@ -468,10 +478,20 @@ def monitor_loop():
             else:
                 if len(calibration_samples) == int(cfg["calibration_seconds"] * cfg["sample_hz"]):
                     add_event("calibration", "Calibration completed.")
+                    calibration_sigma = (
+                        statistics.pstdev(calibration_samples)
+                        if len(calibration_samples) > 1
+                        else 0.0
+                    )
                     calibration_samples.append(filtered_pressure)
                     with state_lock:
                         system_state["last_breath_time"] = now
                         system_state["last_breath_age_s"] = 0.0
+                        system_state["calibration_noise_sigma_pa"] = round(calibration_sigma, 2)
+                with state_lock:
+                    ignore_pressure_until = system_state["ignore_pressure_until"]
+                if now >= ignore_pressure_until:
+                    baseline_window.append(filtered_pressure)
                 baseline = sum(baseline_window) / len(baseline_window)
                 sigma = statistics.pstdev(list(baseline_window)) if len(baseline_window) > 1 else 0.0
                 breath_state = "monitoring"
@@ -505,7 +525,7 @@ def monitor_loop():
                     system_state["breath_state"] = breath_state
 
             if breath_state == "monitoring":
-                maybe_trigger_breath(delta, now, cfg)
+                maybe_detect_breath_activity(delta, now, cfg)
                 update_apnea_control(now, cfg)
 
             refresh_derived_history()
@@ -540,7 +560,7 @@ def config_route():
 
     updates = request.get_json(silent=True) or {}
     allowed = {
-        "min_inhale_delta_pa": float,
+        "min_breath_activity_pa": float,
         "assist_mode": str,
         "noise_sigma_multiplier": float,
         "cooldown_seconds": float,

@@ -18,7 +18,7 @@
 
 当前代码处于 **Phase 1：BMP280 压差 + 舵机 + LED 实测阶段**。MAX30102 还未接入，SpO2/心率相关代码已禁用，不生成假血氧数据，也不会用 SpO2 参与报警或控制。
 
-默认辅助策略是 `apnea_only`：检测到正常吸气时只记录呼吸并清除呼吸暂停报警，不驱动舵机；超过 `apnea_detect_seconds` 未检测到有效呼吸时进入呼吸暂停报警，并按 `assist_interval_seconds` 周期触发台架泵气。每次泵气后会在 `pump_artifact_ignore_seconds` 时间内忽略压差触发，避免球囊动作反过来干扰 BMP280 判定。
+默认辅助策略是 `apnea_only`：检测到正常呼吸活动时只记录呼吸并清除呼吸暂停报警，不驱动舵机；超过 `apnea_detect_seconds` 未检测到有效呼吸活动时进入呼吸暂停报警，并按 `assist_interval_seconds` 周期触发台架泵气。呼吸活动采用双向压差判断，即 `abs(delta_pressure_pa)` 超过活动阈值即可，兼容不同人的呼气/吸气强弱和采样管方向差异。每次泵气后会在 `pump_artifact_ignore_seconds` 时间内忽略压差触发，并暂停基准更新，降低球囊动作对 BMP280 的干扰。
 
 项目参考 `radar` 示例中的架构思想，采用“后台硬件线程 + Flask API + ECharts 实时仪表盘”的方式，将传感器数据、呼吸判定、舵机状态、报警信息和调试参数集中展示，便于实验记录和答辩演示。
 

@@ -393,8 +393,8 @@
                 <div class="panel-body">
                     <div class="form-grid">
                         <div class="field">
-                            <label for="min_inhale_delta_pa">吸气阈值 Pa</label>
-                            <input id="min_inhale_delta_pa" type="number" step="0.5">
+                            <label for="min_breath_activity_pa">活动阈值 Pa</label>
+                            <input id="min_breath_activity_pa" type="number" step="0.5">
                         </div>
                         <div class="field">
                             <label for="cooldown_seconds">冷却时间 s</label>
@@ -454,7 +454,7 @@
     <script>
         const chart = echarts.init(document.getElementById('pressureChart'));
         const configFields = [
-            'min_inhale_delta_pa',
+            'min_breath_activity_pa',
             'cooldown_seconds',
             'apnea_detect_seconds',
             'assist_interval_seconds',
@@ -541,7 +541,7 @@
         function renderData(data) {
             document.getElementById('modeValue').textContent = data.mode || '--';
             document.getElementById('deltaValue').textContent = `${fmt(data.delta_pressure_pa)} Pa`;
-            document.getElementById('thresholdValue').textContent = `阈值 ${fmt(data.effective_inhale_threshold_pa)} Pa`;
+            document.getElementById('thresholdValue').textContent = `活动阈值 ±${fmt(data.effective_breath_threshold_pa)} Pa`;
             document.getElementById('breathState').textContent = data.breath_state || '--';
             document.getElementById('lastBreathValue').textContent = `${data.assist_mode || '--'} · 距上次 ${fmt(data.last_breath_age_s)} s`;
             document.getElementById('spo2Status').textContent = data.spo2_status || '未接入';
@@ -563,7 +563,8 @@
                     data: y,
                     markLine: {
                         data: [
-                            { yAxis: data.effective_inhale_threshold_pa, name: '吸气阈值' },
+                            { yAxis: data.effective_breath_threshold_pa, name: '正向活动阈值' },
+                            { yAxis: -data.effective_breath_threshold_pa, name: '负向活动阈值' },
                             { yAxis: 0, name: '基准' }
                         ]
                     }
