@@ -126,10 +126,10 @@ class HardwarePressureReader:
         bus = SMBus(1)
         try:
             sensor = BMP280(i2c_addr=address, i2c_dev=bus)
-            sensor.get_pressure()
+            self._warmup_pimoroni_sensor(sensor)
         except TypeError:
             sensor = BMP280(i2c_dev=bus)
-            sensor.get_pressure()
+            self._warmup_pimoroni_sensor(sensor)
 
         self.driver = "bmp280"
         self.bus = bus
@@ -142,12 +142,28 @@ class HardwarePressureReader:
 
         bus = smbus2.SMBus(1)
         calibration = bme280.load_calibration_params(bus, address)
-        bme280.sample(bus, address, calibration)
+        self._warmup_bme280_sensor(bme280, bus, address, calibration)
 
         self.driver = "bme280"
         self.bus = bus
         self.sensor = (bme280, calibration)
         self.address = address
+
+    def _warmup_pimoroni_sensor(self, sensor):
+        last_pressure = None
+        for _ in range(8):
+            last_pressure = float(sensor.get_pressure())
+            time.sleep(0.05)
+        if last_pressure is None or not 800.0 <= last_pressure <= 1100.0:
+            raise RuntimeError(f"implausible pressure after warmup: {last_pressure} hPa")
+
+    def _warmup_bme280_sensor(self, bme280, bus, address, calibration):
+        last_pressure = None
+        for _ in range(8):
+            last_pressure = float(bme280.sample(bus, address, calibration).pressure)
+            time.sleep(0.05)
+        if last_pressure is None or not 800.0 <= last_pressure <= 1100.0:
+            raise RuntimeError(f"implausible pressure after warmup: {last_pressure} hPa")
 
     def read_pa(self):
         if self.driver == "bmp280":
