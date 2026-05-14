@@ -336,7 +336,7 @@
         <div class="topbar">
             <div>
                 <h1>灵息 Phase 1 硬件调试台架</h1>
-                <div class="subtitle">当前只测试 BMP280 压差 + 舵机 + LED；无呼吸进入报警后按间隔辅助泵气。</div>
+                <div class="subtitle">建议传感器夹在氧气面罩呼气孔外侧；使用压差 + 湿度 + 温度活动判断呼吸。</div>
             </div>
             <div class="mode-badge">
                 当前模式
@@ -360,8 +360,8 @@
                 </div>
                 <div class="metric">
                     <label>MAX30102</label>
-                    <strong id="spo2Status">未接入</strong>
-                    <span>SpO2 已禁用</span>
+                    <strong id="environmentValue">--</strong>
+                    <span id="environmentActivity">环境传感器 --</span>
                 </div>
                 <div class="metric">
                     <label>舵机</label>
@@ -527,6 +527,7 @@
             const pins = hardware.gpio_pins || {};
             document.getElementById('hardwareList').innerHTML = `
                 <div><strong>传感器：</strong>${hardware.pressure_sensor}</div>
+                <div><strong>温湿度：</strong>${hardware.environment_sensor || 'not configured'}</div>
                 <div><strong>血氧：</strong>${hardware.pulse_oximeter}</div>
                 <div><strong>舵机：</strong>${hardware.servo}</div>
                 <div><strong>LED：</strong>${hardware.led}</div>
@@ -554,7 +555,9 @@
             document.getElementById('thresholdValue').textContent = `幅度 ${fmt(data.breath_activity_amplitude_pa)} / 阈值 ${fmt(data.effective_breath_threshold_pa)} Pa`;
             document.getElementById('breathState').textContent = data.breath_state || '--';
             document.getElementById('lastBreathValue').textContent = `${data.assist_mode || '--'} · ${fmt(data.adaptive_apnea_seconds)}s 判定 · 距上次 ${fmt(data.last_breath_age_s)}s`;
-            document.getElementById('spo2Status').textContent = data.spo2_status || '未接入';
+            document.getElementById('environmentValue').textContent = data.humidity ? `${fmt(data.humidity)}%` : '--';
+            document.getElementById('environmentActivity').textContent =
+                `湿度幅度 ${fmt(data.humidity_activity)}% · 温度幅度 ${fmt(data.temperature_activity, 2)}C`;
             document.getElementById('servoState').textContent = data.servo_state || '--';
             document.getElementById('pumpCountValue').textContent = `手动测试 ${data.pump_test_count || 0} 次`;
             document.getElementById('pressureValue').textContent = `当前气压 ${fmt(data.pressure_pa, 2)} Pa`;

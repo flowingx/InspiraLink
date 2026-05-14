@@ -19,6 +19,8 @@ DEFAULT_CONFIG = {
     "calibration_seconds": 10,
     "breath_window_seconds": 4.0,
     "min_breath_activity_pa": 1.5,
+    "humidity_activity_threshold": 1.0,
+    "temperature_activity_threshold": 0.15,
     "noise_sigma_multiplier": 3.0,
     "breath_amplitude_factor": 0.35,
     "cooldown_seconds": 2.0,
@@ -59,6 +61,11 @@ system_state = {
     "effective_breath_threshold_pa": DEFAULT_CONFIG["min_breath_activity_pa"],
     "effective_inhale_threshold_pa": -DEFAULT_CONFIG["min_breath_activity_pa"],
     "breath_activity_amplitude_pa": 0.0,
+    "humidity": None,
+    "temperature_c": None,
+    "humidity_activity": None,
+    "temperature_activity": None,
+    "environment_sensor_status": "not initialized",
     "adaptive_apnea_seconds": DEFAULT_CONFIG["apnea_min_seconds"],
     "breath_state": "starting",
     "last_breath_time": None,
@@ -80,6 +87,7 @@ system_state = {
     "hardware": {
         "simulation": False,
         "pressure_sensor": "not initialized",
+        "environment_sensor": "not initialized",
         "pulse_oximeter": "disabled: MAX30102 not connected in Phase 1",
         "servo": "not initialized",
         "led": "not initialized",
@@ -99,6 +107,8 @@ pressure_window = deque(maxlen=5)
 baseline_window = deque(maxlen=200)
 calibration_samples = []
 activity_window = deque()
+humidity_window = deque()
+temperature_window = deque()
 breath_times = deque(maxlen=8)
 breath_amplitudes = deque(maxlen=12)
 event_history = deque(maxlen=100)
@@ -109,6 +119,7 @@ monitor_thread = None
 servo_device = None
 led_device = None
 pressure_reader = None
+environment_reader = None
 
 
 class HardwarePressureReader:
@@ -199,6 +210,18 @@ class HardwarePressureReader:
         raise RuntimeError("BMP280 reader is not initialized")
 
 
+class OptionalAHT20Reader:
+    def __init__(self):
+        import adafruit_ahtx0
+        import board
+
+        self.sensor = adafruit_ahtx0.AHTx0(board.I2C())
+        self.read()
+
+    def read(self):
+        return float(self.sensor.relative_humidity), float(self.sensor.temperature)
+
+
 def add_event(kind, message, level="info"):
     event_history.append(
         {
@@ -257,7 +280,7 @@ def init_gpio():
 
 
 def init_hardware():
-    global led_device, pressure_reader, servo_device
+    global environment_reader, led_device, pressure_reader, servo_device
 
     cfg = safe_config()
     try:
@@ -280,6 +303,15 @@ def init_hardware():
         add_event("hardware_error", f"Hardware init failed: {exc}", "error")
         return False
 
+    environment_status = "AHT20 not available"
+    try:
+        environment_reader = OptionalAHT20Reader()
+        environment_status = "AHT20 on I2C"
+        add_event("hardware", "AHT20 environment sensor initialized.")
+    except Exception as exc:
+        environment_reader = None
+        add_event("hardware", f"AHT20 unavailable; pressure-only mode: {exc}", "warning")
+
     update_state(
         hardware={
             "simulation": False,
@@ -287,12 +319,14 @@ def init_hardware():
                 f"BMP280 on I2C bus 1, address 0x{pressure_reader.address:02x}, "
                 f"driver {pressure_reader.driver}"
             ),
+            "environment_sensor": environment_status,
             "pulse_oximeter": "disabled: MAX30102 not connected in Phase 1",
             "servo": f"GPIO{GPIO_PINS['servo']} AngularServo",
             "led": f"GPIO{GPIO_PINS['led']} LED",
             "gpio_pins": GPIO_PINS,
         },
         breath_state="calibrating",
+        environment_sensor_status=environment_status,
     )
     clear_alarm("hardware_init_error")
     add_event("hardware", "BMP280, servo, and LED initialized. SpO2 is disabled.")
@@ -339,6 +373,8 @@ def reset_calibration():
     pressure_window.clear()
     baseline_window.clear()
     activity_window.clear()
+    humidity_window.clear()
+    temperature_window.clear()
     breath_amplitudes.clear()
     with state_lock:
         system_state["baseline_pressure_pa"] = None
@@ -422,22 +458,56 @@ def maybe_detect_breath_activity(delta_pa, now, cfg):
     activity_window.append((now, delta_pa))
     while activity_window and now - activity_window[0][0] > cfg["breath_window_seconds"]:
         activity_window.popleft()
+    while humidity_window and now - humidity_window[0][0] > cfg["breath_window_seconds"]:
+        humidity_window.popleft()
+    while temperature_window and now - temperature_window[0][0] > cfg["breath_window_seconds"]:
+        temperature_window.popleft()
 
     values = [item[1] for item in activity_window]
     amplitude = max(values) - min(values) if values else 0.0
+    humidity_values = [item[1] for item in humidity_window]
+    temperature_values = [item[1] for item in temperature_window]
+    humidity_activity = (
+        max(humidity_values) - min(humidity_values) if len(humidity_values) >= 2 else None
+    )
+    temperature_activity = (
+        max(temperature_values) - min(temperature_values)
+        if len(temperature_values) >= 2
+        else None
+    )
     threshold = current_effective_threshold(cfg)
     with state_lock:
         last_breath = system_state["last_breath_time"]
         breath_state = system_state["breath_state"]
 
     cooldown_ok = last_breath is None or now - last_breath >= cfg["cooldown_seconds"]
-    active_breath = amplitude >= threshold and cooldown_ok and not activity_latched
+    pressure_active = amplitude >= threshold
+    humidity_active = (
+        humidity_activity is not None
+        and humidity_activity >= cfg["humidity_activity_threshold"]
+    )
+    temperature_active = (
+        temperature_activity is not None
+        and temperature_activity >= cfg["temperature_activity_threshold"]
+    )
+    active_breath = (
+        (pressure_active or humidity_active or temperature_active)
+        and cooldown_ok
+        and not activity_latched
+    )
     recovered = amplitude < threshold * 0.55
 
     if active_breath:
         breath_times.append(now)
         breath_amplitudes.append(amplitude)
         direction = "negative" if abs(min(values)) > abs(max(values)) else "positive"
+        features = []
+        if pressure_active:
+            features.append(f"pressure {amplitude:.1f} Pa")
+        if humidity_active:
+            features.append(f"humidity {humidity_activity:.1f}%")
+        if temperature_active:
+            features.append(f"temperature {temperature_activity:.2f}C")
         update_state(
             last_breath_time=now,
             last_breath_age_s=0.0,
@@ -450,7 +520,7 @@ def maybe_detect_breath_activity(delta_pa, now, cfg):
         set_led(True)
         add_event(
             "breath",
-            f"Breath activity detected ({direction}, amplitude {amplitude:.1f} Pa); apnea alarm cleared.",
+            f"Breath activity detected ({direction}, {', '.join(features)}); apnea alarm cleared.",
         )
         if cfg["assist_mode"] == "sync":
             threading.Thread(target=execute_pump, args=("breath_sync",), daemon=True).start()
@@ -460,6 +530,10 @@ def maybe_detect_breath_activity(delta_pa, now, cfg):
 
     update_state(
         breath_activity_amplitude_pa=round(amplitude, 2),
+        humidity_activity=round(humidity_activity, 2) if humidity_activity is not None else None,
+        temperature_activity=round(temperature_activity, 3)
+        if temperature_activity is not None
+        else None,
         effective_breath_threshold_pa=round(threshold, 2),
         effective_inhale_threshold_pa=round(-threshold, 2),
         adaptive_apnea_seconds=round(current_adaptive_apnea_seconds(cfg), 1),
@@ -511,6 +585,21 @@ def monitor_loop():
             pressure_window.append(raw_pressure)
             filtered_pressure = sum(pressure_window) / len(pressure_window)
             clear_alarm("pressure_sensor_error")
+            humidity = None
+            temperature_c = None
+            if environment_reader is not None:
+                try:
+                    humidity, temperature_c = environment_reader.read()
+                    humidity_window.append((now, humidity))
+                    temperature_window.append((now, temperature_c))
+                    update_state(
+                        humidity=round(humidity, 2),
+                        temperature_c=round(temperature_c, 2),
+                        environment_sensor_status="AHT20 active",
+                    )
+                except Exception as exc:
+                    update_state(environment_sensor_status=f"AHT20 read failed: {exc}")
+                    add_event("environment_error", f"AHT20 read failed: {exc}", "warning")
 
             if len(calibration_samples) < int(cfg["calibration_seconds"] * cfg["sample_hz"]):
                 baseline_window.append(filtered_pressure)
@@ -712,6 +801,33 @@ def test_pressure_sensor(samples=20, delay=0.1):
     )
 
 
+def test_environment_sensor(samples=20, delay=0.5):
+    reader = OptionalAHT20Reader()
+    humidities = []
+    temperatures = []
+    for _ in range(samples):
+        humidity, temperature_c = reader.read()
+        humidities.append(humidity)
+        temperatures.append(temperature_c)
+        print(f"humidity={humidity:.2f}% temperature_c={temperature_c:.2f}")
+        time.sleep(delay)
+    print(
+        json.dumps(
+            {
+                "samples": len(humidities),
+                "humidity_min": round(min(humidities), 2),
+                "humidity_max": round(max(humidities), 2),
+                "humidity_delta": round(max(humidities) - min(humidities), 2),
+                "temperature_min": round(min(temperatures), 2),
+                "temperature_max": round(max(temperatures), 2),
+                "temperature_delta": round(max(temperatures) - min(temperatures), 3),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+
 def test_led(cycles=3, on_seconds=0.5):
     led, _ = init_gpio()
     try:
@@ -753,7 +869,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="InspiraLink Phase 1 hardware runner")
     parser.add_argument(
         "--test",
-        choices=["pressure", "led", "servo", "all", "routes"],
+        choices=["pressure", "environment", "led", "servo", "all", "routes"],
         help="run one hardware/module test and exit",
     )
     parser.add_argument("--host", default="0.0.0.0")
@@ -765,12 +881,15 @@ if __name__ == "__main__":
     args = parse_args()
     if args.test == "pressure":
         test_pressure_sensor()
+    elif args.test == "environment":
+        test_environment_sensor()
     elif args.test == "led":
         test_led()
     elif args.test == "servo":
         test_servo()
     elif args.test == "all":
         test_pressure_sensor()
+        test_environment_sensor()
         test_led()
         test_servo()
     elif args.test == "routes":
