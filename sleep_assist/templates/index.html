@@ -1,0 +1,628 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>睡眠监测与辅助呼吸台架</title>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+    <style>
+        :root {
+            --bg: #f3f6f8;
+            --panel: #ffffff;
+            --ink: #172026;
+            --muted: #64727d;
+            --line: #d7e0e7;
+            --accent: #007c89;
+            --accent-2: #c2542d;
+            --ok: #1f8a5b;
+            --warn: #b46a00;
+            --bad: #b42318;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            background: var(--bg);
+            color: var(--ink);
+            font-family: "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
+        }
+
+        header {
+            border-bottom: 1px solid var(--line);
+            background: #ffffff;
+        }
+
+        .topbar {
+            width: min(1280px, calc(100vw - 32px));
+            margin: 0 auto;
+            padding: 18px 0 14px;
+            display: flex;
+            align-items: flex-end;
+            justify-content: space-between;
+            gap: 24px;
+        }
+
+        h1 {
+            margin: 0;
+            font-size: 24px;
+            font-weight: 700;
+            letter-spacing: 0;
+        }
+
+        .subtitle {
+            margin-top: 6px;
+            color: var(--muted);
+            font-size: 13px;
+        }
+
+        .mode-badge {
+            min-width: 170px;
+            border: 1px solid var(--line);
+            border-radius: 6px;
+            padding: 8px 10px;
+            background: #f8fafb;
+            text-align: right;
+            font-size: 13px;
+            color: var(--muted);
+        }
+
+        .mode-badge strong {
+            display: block;
+            color: var(--ink);
+            font-size: 16px;
+            margin-top: 2px;
+        }
+
+        main {
+            width: min(1280px, calc(100vw - 32px));
+            margin: 18px auto 28px;
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) 360px;
+            gap: 16px;
+        }
+
+        .panel {
+            background: var(--panel);
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            min-width: 0;
+        }
+
+        .panel-header {
+            min-height: 44px;
+            padding: 12px 14px;
+            border-bottom: 1px solid var(--line);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+        }
+
+        .panel-title {
+            margin: 0;
+            font-size: 15px;
+            font-weight: 700;
+        }
+
+        .panel-body {
+            padding: 14px;
+        }
+
+        .chart-panel {
+            min-height: 460px;
+        }
+
+        #pressureChart {
+            width: 100%;
+            height: 390px;
+        }
+
+        .cards {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+
+        .metric {
+            background: var(--panel);
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            padding: 12px;
+            min-height: 92px;
+        }
+
+        .metric label {
+            display: block;
+            color: var(--muted);
+            font-size: 12px;
+            margin-bottom: 8px;
+        }
+
+        .metric strong {
+            display: block;
+            font-size: 26px;
+            line-height: 1.1;
+        }
+
+        .metric span {
+            display: block;
+            margin-top: 5px;
+            color: var(--muted);
+            font-size: 12px;
+        }
+
+        .status-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+
+        .pill {
+            display: inline-flex;
+            align-items: center;
+            min-height: 28px;
+            border-radius: 999px;
+            padding: 4px 10px;
+            font-size: 13px;
+            border: 1px solid var(--line);
+            background: #f8fafb;
+        }
+
+        .pill.ok {
+            color: var(--ok);
+            border-color: rgba(31, 138, 91, 0.35);
+            background: rgba(31, 138, 91, 0.08);
+        }
+
+        .pill.warn {
+            color: var(--warn);
+            border-color: rgba(180, 106, 0, 0.35);
+            background: rgba(180, 106, 0, 0.09);
+        }
+
+        .pill.bad {
+            color: var(--bad);
+            border-color: rgba(180, 35, 24, 0.35);
+            background: rgba(180, 35, 24, 0.08);
+        }
+
+        .side {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            min-width: 0;
+        }
+
+        .form-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+
+        .field {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+
+        .field label {
+            color: var(--muted);
+            font-size: 12px;
+        }
+
+        input {
+            width: 100%;
+            height: 34px;
+            border: 1px solid var(--line);
+            border-radius: 6px;
+            padding: 6px 8px;
+            font-size: 14px;
+            background: #fff;
+            color: var(--ink);
+        }
+
+        .actions {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-top: 12px;
+        }
+
+        button {
+            height: 36px;
+            border: 1px solid var(--accent);
+            border-radius: 6px;
+            background: var(--accent);
+            color: #fff;
+            font-weight: 700;
+            cursor: pointer;
+        }
+
+        button.secondary {
+            background: #ffffff;
+            color: var(--accent);
+        }
+
+        button.warning {
+            border-color: var(--accent-2);
+            background: var(--accent-2);
+        }
+
+        button:disabled {
+            opacity: 0.55;
+            cursor: wait;
+        }
+
+        .logs {
+            max-height: 250px;
+            overflow: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .log-item {
+            border-left: 3px solid var(--line);
+            padding: 2px 0 2px 9px;
+            font-size: 13px;
+        }
+
+        .log-item.warning {
+            border-left-color: var(--warn);
+        }
+
+        .log-item.error {
+            border-left-color: var(--bad);
+        }
+
+        .log-time {
+            color: var(--muted);
+            font-size: 11px;
+            margin-bottom: 2px;
+        }
+
+        .hardware-list {
+            display: grid;
+            gap: 7px;
+            color: var(--muted);
+            font-size: 13px;
+        }
+
+        .hardware-list strong {
+            color: var(--ink);
+        }
+
+        @media (max-width: 980px) {
+            main {
+                grid-template-columns: 1fr;
+            }
+
+            .cards {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+
+            .topbar {
+                align-items: flex-start;
+                flex-direction: column;
+            }
+
+            .mode-badge {
+                width: 100%;
+                text-align: left;
+            }
+        }
+
+        @media (max-width: 560px) {
+            .cards,
+            .form-grid,
+            .actions,
+            .status-row {
+                grid-template-columns: 1fr;
+            }
+
+            #pressureChart {
+                height: 330px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="topbar">
+            <div>
+                <h1>睡眠监测与辅助呼吸半实物验证台架</h1>
+                <div class="subtitle">仅用于课程台架演示；不连接真实人体气道，不作为医疗设备使用。</div>
+            </div>
+            <div class="mode-badge">
+                当前模式
+                <strong id="modeValue">--</strong>
+            </div>
+        </div>
+    </header>
+
+    <main>
+        <section>
+            <div class="cards">
+                <div class="metric">
+                    <label>压差</label>
+                    <strong id="deltaValue">--</strong>
+                    <span id="thresholdValue">阈值 -- Pa</span>
+                </div>
+                <div class="metric">
+                    <label>呼吸状态</label>
+                    <strong id="breathState">--</strong>
+                    <span id="lastBreathValue">距上次 -- s</span>
+                </div>
+                <div class="metric">
+                    <label>SpO2</label>
+                    <strong id="spo2Value">--</strong>
+                    <span id="heartRateValue">心率 -- bpm</span>
+                </div>
+                <div class="metric">
+                    <label>舵机</label>
+                    <strong id="servoState">--</strong>
+                    <span id="pumpCountValue">手动测试 0 次</span>
+                </div>
+            </div>
+
+            <div class="panel chart-panel">
+                <div class="panel-header">
+                    <h2 class="panel-title">BMP280 压差波形</h2>
+                    <div id="alarmBadge" class="pill ok">无报警</div>
+                </div>
+                <div class="panel-body">
+                    <div id="pressureChart"></div>
+                    <div class="status-row">
+                        <div class="pill" id="pressureValue">当前气压 -- Pa</div>
+                        <div class="pill" id="baselineValue">基准气压 -- Pa</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <aside class="side">
+            <div class="panel">
+                <div class="panel-header">
+                    <h2 class="panel-title">控制与参数</h2>
+                </div>
+                <div class="panel-body">
+                    <div class="form-grid">
+                        <div class="field">
+                            <label for="min_inhale_delta_pa">吸气阈值 Pa</label>
+                            <input id="min_inhale_delta_pa" type="number" step="0.5">
+                        </div>
+                        <div class="field">
+                            <label for="cooldown_seconds">冷却时间 s</label>
+                            <input id="cooldown_seconds" type="number" step="0.1">
+                        </div>
+                        <div class="field">
+                            <label for="watchdog_seconds">看门狗 s</label>
+                            <input id="watchdog_seconds" type="number" step="0.5">
+                        </div>
+                        <div class="field">
+                            <label for="spo2_alarm_threshold">SpO2 报警 %</label>
+                            <input id="spo2_alarm_threshold" type="number" step="1">
+                        </div>
+                        <div class="field">
+                            <label for="servo_rest_angle">舵机复位角</label>
+                            <input id="servo_rest_angle" type="number" step="1">
+                        </div>
+                        <div class="field">
+                            <label for="servo_press_angle">舵机压下角</label>
+                            <input id="servo_press_angle" type="number" step="1">
+                        </div>
+                    </div>
+                    <div class="actions">
+                        <button id="saveConfig">保存参数</button>
+                        <button id="calibrate" class="secondary">重新校准</button>
+                        <button id="pumpTest" class="warning">手动泵气测试</button>
+                        <button id="refreshConfig" class="secondary">读取参数</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel">
+                <div class="panel-header">
+                    <h2 class="panel-title">硬件连接</h2>
+                </div>
+                <div class="panel-body">
+                    <div class="hardware-list" id="hardwareList"></div>
+                </div>
+            </div>
+
+            <div class="panel">
+                <div class="panel-header">
+                    <h2 class="panel-title">事件日志</h2>
+                </div>
+                <div class="panel-body">
+                    <div class="logs" id="logs"></div>
+                </div>
+            </div>
+        </aside>
+    </main>
+
+    <script>
+        const chart = echarts.init(document.getElementById('pressureChart'));
+        const configFields = [
+            'min_inhale_delta_pa',
+            'cooldown_seconds',
+            'watchdog_seconds',
+            'spo2_alarm_threshold',
+            'servo_rest_angle',
+            'servo_press_angle'
+        ];
+
+        const chartOption = {
+            animation: false,
+            tooltip: { trigger: 'axis' },
+            grid: { left: 54, right: 20, top: 24, bottom: 42 },
+            xAxis: {
+                type: 'category',
+                boundaryGap: false,
+                axisLabel: { color: '#64727d' },
+                axisLine: { lineStyle: { color: '#d7e0e7' } },
+                data: []
+            },
+            yAxis: {
+                type: 'value',
+                name: 'Pa',
+                axisLabel: { color: '#64727d' },
+                splitLine: { lineStyle: { color: '#e7edf2' } }
+            },
+            series: [
+                {
+                    name: '压差',
+                    type: 'line',
+                    data: [],
+                    smooth: true,
+                    showSymbol: false,
+                    lineStyle: { color: '#007c89', width: 2 },
+                    areaStyle: { color: 'rgba(0, 124, 137, 0.10)' },
+                    markLine: {
+                        silent: true,
+                        symbol: 'none',
+                        data: []
+                    }
+                }
+            ]
+        };
+        chart.setOption(chartOption);
+
+        function fmt(value, digits = 1) {
+            return value === null || value === undefined ? '--' : Number(value).toFixed(digits);
+        }
+
+        function setButtonBusy(button, busy) {
+            button.disabled = busy;
+        }
+
+        function alarmClass(alarms) {
+            if (!alarms || alarms.length === 0) return 'pill ok';
+            if (alarms.some(item => item.includes('error') || item.includes('power'))) return 'pill bad';
+            return 'pill warn';
+        }
+
+        function renderHardware(hardware) {
+            const pins = hardware.gpio_pins || {};
+            document.getElementById('hardwareList').innerHTML = `
+                <div><strong>传感器：</strong>${hardware.pressure_sensor}</div>
+                <div><strong>血氧：</strong>${hardware.pulse_oximeter}</div>
+                <div><strong>舵机：</strong>${hardware.servo}</div>
+                <div><strong>LED：</strong>${hardware.led}</div>
+                <div><strong>GPIO：</strong>LED ${pins.led}, Servo ${pins.servo}, SDA ${pins.i2c_sda}, SCL ${pins.i2c_scl}</div>
+            `;
+        }
+
+        function renderLogs(events) {
+            const logs = document.getElementById('logs');
+            const rows = (events || []).slice(-24).reverse().map(item => {
+                const time = new Date(item.ts * 1000).toLocaleTimeString();
+                return `
+                    <div class="log-item ${item.level}">
+                        <div class="log-time">${time} · ${item.kind}</div>
+                        <div>${item.message}</div>
+                    </div>
+                `;
+            });
+            logs.innerHTML = rows.join('') || '<div class="log-item"><div>暂无事件</div></div>';
+        }
+
+        function renderData(data) {
+            document.getElementById('modeValue').textContent = data.hardware.simulation ? '模拟台架' : data.mode;
+            document.getElementById('deltaValue').textContent = `${fmt(data.delta_pressure_pa)} Pa`;
+            document.getElementById('thresholdValue').textContent = `阈值 ${fmt(data.effective_inhale_threshold_pa)} Pa`;
+            document.getElementById('breathState').textContent = data.breath_state || '--';
+            document.getElementById('lastBreathValue').textContent = `距上次 ${fmt(data.last_breath_age_s)} s`;
+            document.getElementById('spo2Value').textContent = data.spo2 ? `${fmt(data.spo2)}%` : '--';
+            document.getElementById('heartRateValue').textContent = `心率 ${data.heart_rate || '--'} bpm`;
+            document.getElementById('servoState').textContent = data.servo_state || '--';
+            document.getElementById('pumpCountValue').textContent = `手动测试 ${data.pump_test_count || 0} 次`;
+            document.getElementById('pressureValue').textContent = `当前气压 ${fmt(data.pressure_pa, 2)} Pa`;
+            document.getElementById('baselineValue').textContent = `基准气压 ${fmt(data.baseline_pressure_pa, 2)} Pa`;
+
+            const alarmBadge = document.getElementById('alarmBadge');
+            alarmBadge.className = alarmClass(data.alarms);
+            alarmBadge.textContent = data.alarms && data.alarms.length ? data.alarms.join(', ') : '无报警';
+
+            const history = data.history.pressure || [];
+            const x = history.map(item => new Date(item.ts * 1000).toLocaleTimeString());
+            const y = history.map(item => item.delta_pressure_pa);
+            chart.setOption({
+                xAxis: { data: x },
+                series: [{
+                    data: y,
+                    markLine: {
+                        data: [
+                            { yAxis: data.effective_inhale_threshold_pa, name: '吸气阈值' },
+                            { yAxis: 0, name: '基准' }
+                        ]
+                    }
+                }]
+            });
+
+            renderHardware(data.hardware);
+            renderLogs(data.history.events);
+        }
+
+        async function loadData() {
+            const response = await fetch('/data');
+            renderData(await response.json());
+        }
+
+        async function loadConfig() {
+            const response = await fetch('/config');
+            const cfg = await response.json();
+            for (const field of configFields) {
+                document.getElementById(field).value = cfg[field];
+            }
+        }
+
+        async function postJson(url, body = {}) {
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            });
+            return response.json();
+        }
+
+        document.getElementById('saveConfig').addEventListener('click', async event => {
+            const button = event.currentTarget;
+            setButtonBusy(button, true);
+            const payload = {};
+            for (const field of configFields) {
+                payload[field] = document.getElementById(field).value;
+            }
+            await postJson('/config', payload);
+            await loadConfig();
+            setButtonBusy(button, false);
+        });
+
+        document.getElementById('calibrate').addEventListener('click', async event => {
+            const button = event.currentTarget;
+            setButtonBusy(button, true);
+            await postJson('/calibrate');
+            setButtonBusy(button, false);
+        });
+
+        document.getElementById('pumpTest').addEventListener('click', async event => {
+            const button = event.currentTarget;
+            setButtonBusy(button, true);
+            await postJson('/pump_test');
+            setButtonBusy(button, false);
+        });
+
+        document.getElementById('refreshConfig').addEventListener('click', loadConfig);
+        window.addEventListener('resize', () => chart.resize());
+
+        loadConfig();
+        loadData();
+        setInterval(loadData, 250);
+    </script>
+</body>
+</html>
