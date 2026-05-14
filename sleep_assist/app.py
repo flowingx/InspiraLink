@@ -17,12 +17,18 @@ DEFAULT_CONFIG = {
     "assist_mode": "apnea_only",
     "sample_hz": 20,
     "calibration_seconds": 10,
-    "min_breath_activity_pa": 3.0,
+    "breath_window_seconds": 4.0,
+    "min_breath_activity_pa": 1.5,
     "noise_sigma_multiplier": 3.0,
-    "cooldown_seconds": 1.5,
-    "apnea_detect_seconds": 5.0,
-    "assist_interval_seconds": 3.0,
+    "breath_amplitude_factor": 0.35,
+    "cooldown_seconds": 2.0,
+    "apnea_min_seconds": 12.0,
+    "apnea_max_seconds": 25.0,
+    "adaptive_apnea_factor": 2.5,
+    "assist_interval_seconds": 5.0,
     "pump_artifact_ignore_seconds": 2.0,
+    "post_pump_recovery_seconds": 8.0,
+    "post_pump_threshold_factor": 0.65,
     "servo_rest_angle": 30,
     "servo_press_angle": 105,
     "pump_hold_seconds": 0.55,
@@ -52,13 +58,17 @@ system_state = {
     "calibration_noise_sigma_pa": 0.0,
     "effective_breath_threshold_pa": DEFAULT_CONFIG["min_breath_activity_pa"],
     "effective_inhale_threshold_pa": -DEFAULT_CONFIG["min_breath_activity_pa"],
+    "breath_activity_amplitude_pa": 0.0,
+    "adaptive_apnea_seconds": DEFAULT_CONFIG["apnea_min_seconds"],
     "breath_state": "starting",
     "last_breath_time": None,
     "last_breath_age_s": None,
     "resp_rate_est": None,
     "apnea_active": False,
+    "activity_latched": False,
     "last_assist_time": None,
     "ignore_pressure_until": 0.0,
+    "recovery_until": 0.0,
     # Phase 1 only tests BMP280 pressure + servo + LED.
     # MAX30102/SpO2 is intentionally disabled until the sensor is available.
     "spo2": None,
@@ -88,7 +98,9 @@ system_state = {
 pressure_window = deque(maxlen=5)
 baseline_window = deque(maxlen=200)
 calibration_samples = []
+activity_window = deque()
 breath_times = deque(maxlen=8)
+breath_amplitudes = deque(maxlen=12)
 event_history = deque(maxlen=100)
 pressure_history = deque(maxlen=400)
 stop_event = threading.Event()
@@ -300,14 +312,34 @@ def set_led(active):
 def current_effective_threshold(cfg):
     with state_lock:
         sigma = system_state["calibration_noise_sigma_pa"]
-    adaptive = abs(cfg["noise_sigma_multiplier"] * sigma)
-    return max(float(cfg["min_breath_activity_pa"]), adaptive)
+        recovery_until = system_state["recovery_until"]
+    adaptive_noise = abs(cfg["noise_sigma_multiplier"] * sigma)
+    learned_amplitude = 0.0
+    if breath_amplitudes:
+        learned_amplitude = statistics.median(breath_amplitudes) * cfg["breath_amplitude_factor"]
+    threshold = max(float(cfg["min_breath_activity_pa"]), adaptive_noise, learned_amplitude)
+    if time.time() < recovery_until:
+        threshold *= cfg["post_pump_threshold_factor"]
+    return max(0.5, threshold)
+
+
+def current_adaptive_apnea_seconds(cfg):
+    if len(breath_times) < 3:
+        return float(cfg["apnea_min_seconds"])
+    intervals = [
+        later - earlier for earlier, later in zip(list(breath_times), list(breath_times)[1:])
+    ]
+    median_interval = statistics.median(intervals)
+    adaptive = median_interval * cfg["adaptive_apnea_factor"]
+    return max(float(cfg["apnea_min_seconds"]), min(float(cfg["apnea_max_seconds"]), adaptive))
 
 
 def reset_calibration():
     calibration_samples.clear()
     pressure_window.clear()
     baseline_window.clear()
+    activity_window.clear()
+    breath_amplitudes.clear()
     with state_lock:
         system_state["baseline_pressure_pa"] = None
         system_state["noise_sigma_pa"] = 0.0
@@ -317,8 +349,10 @@ def reset_calibration():
         system_state["last_breath_age_s"] = None
         system_state["assist_mode"] = safe_config()["assist_mode"]
         system_state["apnea_active"] = False
+        system_state["activity_latched"] = False
         system_state["last_assist_time"] = None
         system_state["ignore_pressure_until"] = 0.0
+        system_state["recovery_until"] = 0.0
     clear_alarm("apnea_watchdog")
     add_event("calibration", "Calibration restarted; keep the pressure tube still.")
 
@@ -365,6 +399,7 @@ def execute_pump(reason="manual"):
                 servo_state="idle",
                 last_assist_time=now,
                 ignore_pressure_until=time.time() + cfg["pump_artifact_ignore_seconds"],
+                recovery_until=time.time() + cfg["post_pump_recovery_seconds"],
             )
             add_event("pump", "Pump action completed.")
             return True, "pump completed"
@@ -379,49 +414,61 @@ def execute_pump(reason="manual"):
 def maybe_detect_breath_activity(delta_pa, now, cfg):
     with state_lock:
         ignore_pressure_until = system_state["ignore_pressure_until"]
+        activity_latched = system_state["activity_latched"]
     if now < ignore_pressure_until:
         update_state(breath_state="pump_artifact_ignored")
         return
 
+    activity_window.append((now, delta_pa))
+    while activity_window and now - activity_window[0][0] > cfg["breath_window_seconds"]:
+        activity_window.popleft()
+
+    values = [item[1] for item in activity_window]
+    amplitude = max(values) - min(values) if values else 0.0
     threshold = current_effective_threshold(cfg)
     with state_lock:
         last_breath = system_state["last_breath_time"]
         breath_state = system_state["breath_state"]
 
     cooldown_ok = last_breath is None or now - last_breath >= cfg["cooldown_seconds"]
-    active_breath = abs(delta_pa) >= threshold and cooldown_ok
-    recovered = abs(delta_pa) < threshold * 0.45
+    active_breath = amplitude >= threshold and cooldown_ok and not activity_latched
+    recovered = amplitude < threshold * 0.55
 
     if active_breath:
         breath_times.append(now)
-        direction = "negative" if delta_pa < 0 else "positive"
+        breath_amplitudes.append(amplitude)
+        direction = "negative" if abs(min(values)) > abs(max(values)) else "positive"
         update_state(
             last_breath_time=now,
             last_breath_age_s=0.0,
             resp_rate_est=calculate_resp_rate(),
             breath_state="breath_activity",
             apnea_active=False,
+            activity_latched=True,
         )
         clear_alarm("apnea_watchdog")
         set_led(True)
         add_event(
             "breath",
-            f"Breath activity detected ({direction}, {delta_pa:.1f} Pa); apnea alarm cleared.",
+            f"Breath activity detected ({direction}, amplitude {amplitude:.1f} Pa); apnea alarm cleared.",
         )
         if cfg["assist_mode"] == "sync":
             threading.Thread(target=execute_pump, args=("breath_sync",), daemon=True).start()
-    elif breath_state == "breath_activity" and recovered:
+    elif (breath_state == "breath_activity" or activity_latched) and recovered:
         set_led(False)
-        update_state(breath_state="monitoring")
+        update_state(breath_state="monitoring", activity_latched=False)
 
     update_state(
+        breath_activity_amplitude_pa=round(amplitude, 2),
         effective_breath_threshold_pa=round(threshold, 2),
         effective_inhale_threshold_pa=round(-threshold, 2),
+        adaptive_apnea_seconds=round(current_adaptive_apnea_seconds(cfg), 1),
     )
 
 
 def update_apnea_control(now, cfg):
-    if cfg["apnea_detect_seconds"] <= 0:
+    apnea_seconds = current_adaptive_apnea_seconds(cfg)
+    if apnea_seconds <= 0:
         clear_alarm("apnea_watchdog")
         return
 
@@ -430,7 +477,7 @@ def update_apnea_control(now, cfg):
         last_assist = system_state["last_assist_time"]
         apnea_active = system_state["apnea_active"]
 
-    if last_breath is not None and now - last_breath > cfg["apnea_detect_seconds"]:
+    if last_breath is not None and now - last_breath > apnea_seconds:
         add_alarm("apnea_watchdog")
         set_led(True)
         if not apnea_active:
@@ -562,11 +609,17 @@ def config_route():
     allowed = {
         "min_breath_activity_pa": float,
         "assist_mode": str,
+        "breath_window_seconds": float,
         "noise_sigma_multiplier": float,
+        "breath_amplitude_factor": float,
         "cooldown_seconds": float,
-        "apnea_detect_seconds": float,
+        "apnea_min_seconds": float,
+        "apnea_max_seconds": float,
+        "adaptive_apnea_factor": float,
         "assist_interval_seconds": float,
         "pump_artifact_ignore_seconds": float,
+        "post_pump_recovery_seconds": float,
+        "post_pump_threshold_factor": float,
         "servo_rest_angle": int,
         "servo_press_angle": int,
         "pump_hold_seconds": float,

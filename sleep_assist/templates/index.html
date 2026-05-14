@@ -401,8 +401,12 @@
                             <input id="cooldown_seconds" type="number" step="0.1">
                         </div>
                         <div class="field">
-                            <label for="apnea_detect_seconds">暂停判定 s</label>
-                            <input id="apnea_detect_seconds" type="number" step="0.5">
+                            <label for="breath_window_seconds">活动窗口 s</label>
+                            <input id="breath_window_seconds" type="number" step="0.5">
+                        </div>
+                        <div class="field">
+                            <label for="apnea_min_seconds">暂停最短 s</label>
+                            <input id="apnea_min_seconds" type="number" step="0.5">
                         </div>
                         <div class="field">
                             <label for="assist_interval_seconds">泵气间隔 s</label>
@@ -411,6 +415,10 @@
                         <div class="field">
                             <label for="pump_artifact_ignore_seconds">泵后屏蔽 s</label>
                             <input id="pump_artifact_ignore_seconds" type="number" step="0.1">
+                        </div>
+                        <div class="field">
+                            <label for="post_pump_recovery_seconds">恢复观察 s</label>
+                            <input id="post_pump_recovery_seconds" type="number" step="0.5">
                         </div>
                         <div class="field">
                             <label for="servo_rest_angle">舵机复位角</label>
@@ -455,10 +463,12 @@
         const chart = echarts.init(document.getElementById('pressureChart'));
         const configFields = [
             'min_breath_activity_pa',
+            'breath_window_seconds',
             'cooldown_seconds',
-            'apnea_detect_seconds',
+            'apnea_min_seconds',
             'assist_interval_seconds',
             'pump_artifact_ignore_seconds',
+            'post_pump_recovery_seconds',
             'servo_rest_angle',
             'servo_press_angle'
         ];
@@ -541,9 +551,9 @@
         function renderData(data) {
             document.getElementById('modeValue').textContent = data.mode || '--';
             document.getElementById('deltaValue').textContent = `${fmt(data.delta_pressure_pa)} Pa`;
-            document.getElementById('thresholdValue').textContent = `活动阈值 ±${fmt(data.effective_breath_threshold_pa)} Pa`;
+            document.getElementById('thresholdValue').textContent = `幅度 ${fmt(data.breath_activity_amplitude_pa)} / 阈值 ${fmt(data.effective_breath_threshold_pa)} Pa`;
             document.getElementById('breathState').textContent = data.breath_state || '--';
-            document.getElementById('lastBreathValue').textContent = `${data.assist_mode || '--'} · 距上次 ${fmt(data.last_breath_age_s)} s`;
+            document.getElementById('lastBreathValue').textContent = `${data.assist_mode || '--'} · ${fmt(data.adaptive_apnea_seconds)}s 判定 · 距上次 ${fmt(data.last_breath_age_s)}s`;
             document.getElementById('spo2Status').textContent = data.spo2_status || '未接入';
             document.getElementById('servoState').textContent = data.servo_state || '--';
             document.getElementById('pumpCountValue').textContent = `手动测试 ${data.pump_test_count || 0} 次`;

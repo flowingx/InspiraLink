@@ -13,7 +13,7 @@ python .\sleep_assist\app.py
 
 当前版本是 Phase 1 实测版：只测试 BMP280 压差、GPIO18 舵机和 GPIO27 LED。MAX30102/SpO2 暂未接入，代码不会生成假 SpO2 或假心率。
 
-默认 `assist_mode` 为 `apnea_only`：正常呼吸活动只记录并清除呼吸暂停报警，不泵气；超过 `apnea_detect_seconds` 没有检测到有效呼吸活动时进入报警，并按 `assist_interval_seconds` 周期泵气。呼吸活动采用双向压差判断，即 `abs(delta_pressure_pa)` 超过活动阈值即可。每次泵气后会在 `pump_artifact_ignore_seconds` 内忽略压差触发，并暂停基准更新，降低球囊动作对 BMP280 的干扰。
+默认 `assist_mode` 为 `apnea_only`：正常呼吸活动只记录并清除呼吸暂停报警，不泵气。呼吸活动使用 `breath_window_seconds` 窗口内的压差峰峰值，而不是单点尖峰；系统会学习用户近期呼吸间隔，并在 `apnea_min_seconds` 和 `apnea_max_seconds` 范围内自适应暂停判定时间。每次泵气后会在 `pump_artifact_ignore_seconds` 内忽略压差触发，并暂停基准更新；随后进入 `post_pump_recovery_seconds` 恢复观察期，使用更敏感的阈值捕捉弱呼吸。
 
 如果 BMP280 读取失败，界面会显示错误，不会自动切换到模拟波形。
 
