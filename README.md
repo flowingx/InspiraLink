@@ -87,17 +87,13 @@ python3 sleep_assist/app.py --test routes
 ```
 
 - `pressure`：连续读取 BMP280，打印气压均值、范围和标准差。
-- `environment`：连续读取 AHT20，打印湿度/温度范围。若未安装 AHT20 依赖或模块不可用，会直接报出真实错误。
+- `environment`：连续读取 AHT20，打印湿度/温度范围。若模块未连接、地址不通或 CRC 校验失败，会直接报出真实错误。
 - `led`：闪烁 GPIO27 LED。
 - `servo`：让 GPIO18 舵机在复位角和压下角之间动作。
 - `all`：依次测试 BMP280、LED、舵机。
 - `routes`：只测试 Flask 路由，不访问硬件。
 
-AHT20 可选依赖：
-
-```bash
-uv pip install adafruit-circuitpython-ahtx0
-```
+BMP280/AHT20 均走 I2C。AHT20 使用项目内置的 `smbus2` 直连读写实现，协议参考商家资料中的 `ATH20.c/.h`，不依赖 `adafruit_ahtx0`。若已安装 Pimoroni `bmp280`，通常已经同时安装了 `smbus2`。
 
 ## 面罩安装建议
 

@@ -28,11 +28,7 @@ python .\sleep_assist\app.py --test all
 python .\sleep_assist\app.py --test routes
 ```
 
-AHT20 可选依赖：
-
-```powershell
-uv pip install adafruit-circuitpython-ahtx0
-```
+AHT20 使用项目内置的 `smbus2` 直连读写实现，协议参考商家资料中的 `ATH20.c/.h`，不依赖 `adafruit_ahtx0`。若已安装 Pimoroni `bmp280`，通常已经同时安装了 `smbus2`。
 
 ## GPIO
 
