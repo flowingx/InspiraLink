@@ -359,7 +359,7 @@
                     <span id="lastBreathValue">距上次 -- s</span>
                 </div>
                 <div class="metric">
-                    <label>MAX30102</label>
+                    <label>AHT20 温湿度</label>
                     <strong id="environmentValue">--</strong>
                     <span id="environmentActivity">环境传感器 --</span>
                 </div>
@@ -528,7 +528,7 @@
             document.getElementById('hardwareList').innerHTML = `
                 <div><strong>传感器：</strong>${hardware.pressure_sensor}</div>
                 <div><strong>温湿度：</strong>${hardware.environment_sensor || 'not configured'}</div>
-                <div><strong>血氧：</strong>${hardware.pulse_oximeter}</div>
+                <div><strong>MAX30102：</strong>${hardware.pulse_oximeter}</div>
                 <div><strong>舵机：</strong>${hardware.servo}</div>
                 <div><strong>LED：</strong>${hardware.led}</div>
                 <div><strong>GPIO：</strong>LED ${pins.led}, Servo ${pins.servo}, SDA ${pins.i2c_sda}, SCL ${pins.i2c_scl}</div>

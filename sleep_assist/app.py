@@ -5,11 +5,16 @@ import threading
 import time
 from collections import deque
 from copy import deepcopy
+from pathlib import Path
 
 from flask import Flask, jsonify, render_template, request
 
 
 app = Flask(__name__)
+
+RUNTIME_DIR = Path(__file__).resolve().parent / "runtime_logs"
+EVENT_LOG_FILE = RUNTIME_DIR / "events.jsonl"
+SENSOR_LOG_FILE = RUNTIME_DIR / "sensor_samples.jsonl"
 
 
 DEFAULT_CONFIG = {
@@ -115,6 +120,7 @@ event_history = deque(maxlen=100)
 pressure_history = deque(maxlen=400)
 stop_event = threading.Event()
 monitor_thread = None
+last_sensor_log_time = 0.0
 
 servo_device = None
 led_device = None
@@ -348,14 +354,51 @@ class OptionalAHT20Reader:
 
 
 def add_event(kind, message, level="info"):
-    event_history.append(
-        {
-            "ts": round(time.time(), 3),
-            "kind": kind,
-            "level": level,
-            "message": message,
-        }
-    )
+    event = {
+        "ts": round(time.time(), 3),
+        "kind": kind,
+        "level": level,
+        "message": message,
+    }
+    event_history.append(event)
+    try:
+        RUNTIME_DIR.mkdir(exist_ok=True)
+        with EVENT_LOG_FILE.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+    except Exception:
+        # Runtime logging must never break sensing or pump safety behavior.
+        pass
+
+
+def load_persistent_events(limit=200):
+    if not EVENT_LOG_FILE.exists():
+        return []
+
+
+def append_sensor_sample(sample, interval_s=0.5):
+    global last_sensor_log_time
+
+    now = sample["ts"]
+    if now - last_sensor_log_time < interval_s:
+        return
+    last_sensor_log_time = now
+    try:
+        RUNTIME_DIR.mkdir(exist_ok=True)
+        with SENSOR_LOG_FILE.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(sample, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+    try:
+        lines = EVENT_LOG_FILE.read_text(encoding="utf-8").splitlines()[-limit:]
+        events = []
+        for line in lines:
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        return events
+    except Exception:
+        return []
 
 
 def safe_config():
@@ -785,6 +828,21 @@ def monitor_loop():
                 if system_state["breath_state"] in {"starting", "calibrating"}:
                     system_state["breath_state"] = breath_state
 
+            append_sensor_sample(
+                {
+                    "ts": round(now, 3),
+                    "pressure_pa": round(filtered_pressure, 2),
+                    "baseline_pressure_pa": round(baseline, 2),
+                    "delta_pressure_pa": round(delta, 2),
+                    "humidity": round(humidity, 2) if humidity is not None else None,
+                    "temperature_c": round(temperature_c, 2)
+                    if temperature_c is not None
+                    else None,
+                    "breath_state": system_state["breath_state"],
+                    "alarms": list(system_state["alarms"]),
+                }
+            )
+
             if breath_state == "monitoring":
                 maybe_detect_breath_activity(delta, now, cfg)
                 update_apnea_control(now, cfg)
@@ -890,7 +948,17 @@ def led_test():
 
 @app.route("/logs")
 def logs():
-    return jsonify(list(event_history))
+    persisted = load_persistent_events()
+    memory = list(event_history)
+    if not persisted:
+        return jsonify(memory)
+
+    merged = persisted + [
+        event
+        for event in memory
+        if not persisted or event.get("ts") > persisted[-1].get("ts", 0)
+    ]
+    return jsonify(merged[-200:])
 
 
 def start_background_threads():
