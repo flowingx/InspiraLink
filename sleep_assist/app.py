@@ -248,7 +248,10 @@ class OptionalAHT20Reader:
             return self._read_raw(length)
 
     def _read_status(self):
-        return self._read_register_zero(1)[0]
+        try:
+            return int(self.bus.read_byte(self.address))
+        except OSError:
+            return self._read_raw(1)[0]
 
     def _is_calibrated(self, status):
         # Matches the vendor ATH20.c check: normal mode plus calibration enabled.
@@ -274,14 +277,26 @@ class OptionalAHT20Reader:
 
         raise RuntimeError("AHT20 calibration bit did not become ready after init")
 
-    def _wait_ready(self, timeout_s=0.1):
+    def _read_measurement_frame(self, timeout_s=0.2):
+        errors = []
         start = time.time()
         while time.time() - start < timeout_s:
-            status = self._read_status()
-            if not status & self.BUSY_BIT:
-                return status
-            time.sleep(0.001)
-        raise RuntimeError("AHT20 stayed busy after measurement command")
+            for label, reader, length in (
+                ("raw I2C, 7 bytes", self._read_raw, 7),
+                ("raw I2C, 6 bytes", self._read_raw, 6),
+                ("register 0x00, 7 bytes", self._read_register_zero, 7),
+                ("register 0x00, 6 bytes", self._read_register_zero, 6),
+            ):
+                try:
+                    data = reader(length)
+                    if data and data[0] & self.BUSY_BIT:
+                        errors.append(f"{label}: busy status 0x{data[0]:02x}")
+                        continue
+                    return data
+                except Exception as exc:
+                    errors.append(f"{label}: {exc}")
+            time.sleep(0.005)
+        raise RuntimeError("AHT20 measurement not ready; " + " | ".join(errors[-8:]))
 
     def _crc8(self, payload):
         crc = 0xFF
@@ -320,20 +335,14 @@ class OptionalAHT20Reader:
 
     def read(self):
         self._write(self.MEASURE_COMMAND)
-        time.sleep(0.075)
-        self._wait_ready()
+        time.sleep(0.08)
+        data = self._read_measurement_frame()
 
         errors = []
-        for label, reader, length in (
-            ("register 0x00, 7 bytes", self._read_register_zero, 7),
-            ("register 0x00, 6 bytes", self._read_register_zero, 6),
-            ("raw I2C, 7 bytes", self._read_raw, 7),
-            ("raw I2C, 6 bytes", self._read_raw, 6),
-        ):
-            try:
-                return self._decode_measurement(reader(length))
-            except Exception as exc:
-                errors.append(f"{label}: {exc}")
+        try:
+            return self._decode_measurement(data)
+        except Exception as exc:
+            errors.append(str(exc))
 
         raise RuntimeError("AHT20 read failed; " + " | ".join(errors))
 
