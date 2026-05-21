@@ -121,8 +121,8 @@
 - `temperature_activity_threshold`: 温度活动阈值，默认 0.15 C。
 - `cooldown_seconds`: 呼吸触发冷却，默认 2 秒。
 - `apnea_min_seconds`: 呼吸暂停最短判定时间，默认 12 秒。
-- `apnea_max_seconds`: 呼吸暂停最长判定时间，默认 25 秒。
-- `adaptive_apnea_factor`: 用近期呼吸间隔估算暂停阈值的倍率，默认 2.5。
+- `apnea_max_seconds`: 呼吸暂停最长判定时间，默认 15 秒；代码中还有 `APNEA_HARD_LIMIT_SECONDS = 15.0`，配置接口不能把它调到更高。
+- `adaptive_apnea_factor`: 用近期呼吸间隔估算暂停阈值的倍率，默认 2.0，并会被配置接口限制在 2.0 以内。
 - `assist_interval_seconds`: 呼吸暂停期间辅助泵气间隔，默认 5 秒。
 - `pump_artifact_ignore_seconds`: 泵气后压差屏蔽时间，默认 2 秒。
 - `post_pump_recovery_seconds`: 泵气后恢复观察期，默认 8 秒。

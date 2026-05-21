@@ -16,6 +16,10 @@ RUNTIME_DIR = Path(__file__).resolve().parent / "runtime_logs"
 EVENT_LOG_FILE = RUNTIME_DIR / "events.jsonl"
 SENSOR_LOG_FILE = RUNTIME_DIR / "sensor_samples.jsonl"
 
+# Phase 1 is a bench prototype, so keep the adaptive apnea window conservative.
+# The dashboard/config API may tune below this value, but never above it.
+APNEA_HARD_LIMIT_SECONDS = 15.0
+
 
 DEFAULT_CONFIG = {
     "mode": "pressure_servo_led",
@@ -30,8 +34,8 @@ DEFAULT_CONFIG = {
     "breath_amplitude_factor": 0.35,
     "cooldown_seconds": 2.0,
     "apnea_min_seconds": 12.0,
-    "apnea_max_seconds": 25.0,
-    "adaptive_apnea_factor": 2.5,
+    "apnea_max_seconds": 15.0,
+    "adaptive_apnea_factor": 2.0,
     "assist_interval_seconds": 5.0,
     "pump_artifact_ignore_seconds": 2.0,
     "post_pump_recovery_seconds": 8.0,
@@ -72,6 +76,7 @@ system_state = {
     "temperature_activity": None,
     "environment_sensor_status": "not initialized",
     "adaptive_apnea_seconds": DEFAULT_CONFIG["apnea_min_seconds"],
+    "apnea_hard_limit_seconds": APNEA_HARD_LIMIT_SECONDS,
     "breath_state": "starting",
     "last_breath_time": None,
     "last_breath_age_s": None,
@@ -407,6 +412,26 @@ def safe_config():
         return deepcopy(config)
 
 
+def apnea_bounds(cfg):
+    minimum = max(
+        5.0,
+        min(float(cfg.get("apnea_min_seconds", DEFAULT_CONFIG["apnea_min_seconds"])), APNEA_HARD_LIMIT_SECONDS),
+    )
+    configured_max = max(minimum, float(cfg.get("apnea_max_seconds", DEFAULT_CONFIG["apnea_max_seconds"])))
+    maximum = min(configured_max, APNEA_HARD_LIMIT_SECONDS)
+    return minimum, maximum
+
+
+def clamp_config_values(cfg):
+    minimum, maximum = apnea_bounds(cfg)
+    cfg["apnea_min_seconds"] = minimum
+    cfg["apnea_max_seconds"] = maximum
+    cfg["adaptive_apnea_factor"] = max(
+        1.2,
+        min(float(cfg.get("adaptive_apnea_factor", DEFAULT_CONFIG["adaptive_apnea_factor"])), 2.0),
+    )
+
+
 def update_state(**kwargs):
     with state_lock:
         system_state.update(kwargs)
@@ -527,14 +552,15 @@ def current_effective_threshold(cfg):
 
 
 def current_adaptive_apnea_seconds(cfg):
+    apnea_min_seconds, apnea_max_seconds = apnea_bounds(cfg)
     if len(breath_times) < 3:
-        return float(cfg["apnea_min_seconds"])
+        return apnea_min_seconds
     intervals = [
         later - earlier for earlier, later in zip(list(breath_times), list(breath_times)[1:])
     ]
     median_interval = statistics.median(intervals)
-    adaptive = median_interval * cfg["adaptive_apnea_factor"]
-    return max(float(cfg["apnea_min_seconds"]), min(float(cfg["apnea_max_seconds"]), adaptive))
+    adaptive = median_interval * float(cfg["adaptive_apnea_factor"])
+    return min(apnea_max_seconds, max(apnea_min_seconds, adaptive))
 
 
 def reset_calibration():
@@ -967,6 +993,7 @@ def config_route():
         for key, caster in allowed.items():
             if key in updates:
                 config[key] = caster(updates[key])
+        clamp_config_values(config)
         new_config = deepcopy(config)
 
     add_event("config", "Configuration updated from dashboard.")
@@ -1123,11 +1150,36 @@ def test_routes():
     print("GET /logs", client.get("/logs").status_code)
 
 
+def test_apnea_bounds():
+    test_cfg = deepcopy(DEFAULT_CONFIG)
+    test_cfg["apnea_max_seconds"] = 25.0
+    test_cfg["adaptive_apnea_factor"] = 2.5
+    clamp_config_values(test_cfg)
+
+    breath_times.clear()
+    now = time.time()
+    breath_times.extend([now - 50.0, now - 25.0, now])
+
+    print(
+        json.dumps(
+            {
+                "apnea_hard_limit_seconds": APNEA_HARD_LIMIT_SECONDS,
+                "clamped_apnea_min_seconds": test_cfg["apnea_min_seconds"],
+                "clamped_apnea_max_seconds": test_cfg["apnea_max_seconds"],
+                "clamped_adaptive_apnea_factor": test_cfg["adaptive_apnea_factor"],
+                "computed_adaptive_apnea_seconds": current_adaptive_apnea_seconds(test_cfg),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="InspiraLink Phase 1 hardware runner")
     parser.add_argument(
         "--test",
-        choices=["pressure", "environment", "led", "servo", "all", "routes"],
+        choices=["pressure", "environment", "led", "servo", "all", "routes", "apnea"],
         help="run one hardware/module test and exit",
     )
     parser.add_argument("--host", default="0.0.0.0")
@@ -1152,6 +1204,8 @@ if __name__ == "__main__":
         test_servo()
     elif args.test == "routes":
         test_routes()
+    elif args.test == "apnea":
+        test_apnea_bounds()
     else:
         start_background_threads()
         app.run(host=args.host, port=args.port, debug=False)
