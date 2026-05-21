@@ -79,6 +79,7 @@ system_state = {
     "apnea_active": False,
     "activity_latched": False,
     "last_assist_time": None,
+    "last_assist_request_time": None,
     "ignore_pressure_until": 0.0,
     "recovery_until": 0.0,
     # Phase 1 only tests BMP280 pressure + servo + LED.
@@ -555,6 +556,7 @@ def reset_calibration():
         system_state["apnea_active"] = False
         system_state["activity_latched"] = False
         system_state["last_assist_time"] = None
+        system_state["last_assist_request_time"] = None
         system_state["ignore_pressure_until"] = 0.0
         system_state["recovery_until"] = 0.0
     clear_alarm("apnea_watchdog")
@@ -635,47 +637,95 @@ def maybe_detect_breath_activity(delta_pa, now, cfg):
     amplitude = max(values) - min(values) if values else 0.0
     humidity_values = [item[1] for item in humidity_window]
     temperature_values = [item[1] for item in temperature_window]
-    humidity_activity = (
-        max(humidity_values) - min(humidity_values) if len(humidity_values) >= 2 else None
-    )
-    temperature_activity = (
-        max(temperature_values) - min(temperature_values)
-        if len(temperature_values) >= 2
-        else None
-    )
+    humidity_activity = None
+    humidity_recent_rise = 0.0
+    if len(humidity_window) >= 2:
+        humidity_activity = max(0.0, humidity_values[-1] - min(humidity_values[:-1]))
+        recent_humidity_values = [
+            value for ts, value in humidity_window if now - ts <= 1.5
+        ]
+        if len(recent_humidity_values) >= 2:
+            humidity_recent_rise = humidity_values[-1] - min(recent_humidity_values[:-1])
+
+    temperature_activity = None
+    temperature_recent_rise = 0.0
+    if len(temperature_window) >= 2:
+        temperature_activity = max(0.0, temperature_values[-1] - min(temperature_values[:-1]))
+        recent_temperature_values = [
+            value for ts, value in temperature_window if now - ts <= 1.5
+        ]
+        if len(recent_temperature_values) >= 2:
+            temperature_recent_rise = temperature_values[-1] - min(recent_temperature_values[:-1])
+
     threshold = current_effective_threshold(cfg)
     with state_lock:
         last_breath = system_state["last_breath_time"]
         breath_state = system_state["breath_state"]
 
     cooldown_ok = last_breath is None or now - last_breath >= cfg["cooldown_seconds"]
-    pressure_active = amplitude >= threshold
+    pressure_active = False
+    pressure_drift = False
+    pressure_direction = "stable"
+    if len(values) >= 5 and amplitude >= threshold:
+        max_value = max(values)
+        min_value = min(values)
+        max_index = values.index(max_value)
+        min_index = values.index(min_value)
+        drift_limit = max(1.0, threshold * 0.75)
+        edge_drift = abs(values[-1] - values[0])
+        positive_pulse = (
+            0 < max_index < len(values) - 1
+            and max_value - min(values[: max_index + 1]) >= threshold * 0.45
+            and max_value - min(values[max_index:]) >= threshold * 0.45
+            and edge_drift <= drift_limit
+        )
+        negative_pulse = (
+            0 < min_index < len(values) - 1
+            and max(values[: min_index + 1]) - min_value >= threshold * 0.45
+            and max(values[min_index:]) - min_value >= threshold * 0.45
+            and edge_drift <= drift_limit
+        )
+        pressure_active = positive_pulse or negative_pulse
+        pressure_drift = not pressure_active
+        if pressure_active:
+            pressure_direction = "positive" if positive_pulse else "negative"
+
+    humidity_slope_threshold = max(0.15, cfg["humidity_activity_threshold"] * 0.2)
     humidity_active = (
         humidity_activity is not None
         and humidity_activity >= cfg["humidity_activity_threshold"]
+        and humidity_recent_rise >= humidity_slope_threshold
     )
+    temperature_slope_threshold = max(0.03, cfg["temperature_activity_threshold"] * 0.2)
     temperature_active = (
         temperature_activity is not None
         and temperature_activity >= cfg["temperature_activity_threshold"]
+        and temperature_recent_rise >= temperature_slope_threshold
     )
     active_breath = (
         (pressure_active or humidity_active or temperature_active)
         and cooldown_ok
         and not activity_latched
     )
-    recovered = amplitude < threshold * 0.55
+    recovered = (
+        not humidity_active
+        and not temperature_active
+        and (amplitude < threshold * 0.55 or pressure_drift)
+    )
 
     if active_breath:
         breath_times.append(now)
         breath_amplitudes.append(amplitude)
-        direction = "negative" if abs(min(values)) > abs(max(values)) else "positive"
+        direction = pressure_direction
+        if not pressure_active:
+            direction = "humidity_rise" if humidity_active else "temperature_rise"
         features = []
         if pressure_active:
-            features.append(f"pressure {amplitude:.1f} Pa")
+            features.append(f"pressure pulse {amplitude:.1f} Pa")
         if humidity_active:
-            features.append(f"humidity {humidity_activity:.1f}%")
+            features.append(f"humidity rise {humidity_activity:.1f}%")
         if temperature_active:
-            features.append(f"temperature {temperature_activity:.2f}C")
+            features.append(f"temperature rise {temperature_activity:.2f}C")
         update_state(
             last_breath_time=now,
             last_breath_age_s=0.0,
@@ -694,6 +744,10 @@ def maybe_detect_breath_activity(delta_pa, now, cfg):
             threading.Thread(target=execute_pump, args=("breath_sync",), daemon=True).start()
     elif (breath_state == "breath_activity" or activity_latched) and recovered:
         set_led(False)
+        update_state(breath_state="monitoring", activity_latched=False)
+    elif pressure_drift and breath_state == "monitoring":
+        update_state(breath_state="pressure_drift_ignored", activity_latched=False)
+    elif breath_state == "pressure_drift_ignored" and not pressure_drift:
         update_state(breath_state="monitoring", activity_latched=False)
 
     update_state(
@@ -717,7 +771,9 @@ def update_apnea_control(now, cfg):
     with state_lock:
         last_breath = system_state["last_breath_time"]
         last_assist = system_state["last_assist_time"]
+        last_request = system_state["last_assist_request_time"]
         apnea_active = system_state["apnea_active"]
+        servo_state = system_state["servo_state"]
 
     if last_breath is not None and now - last_breath > apnea_seconds:
         add_alarm("apnea_watchdog")
@@ -726,8 +782,15 @@ def update_apnea_control(now, cfg):
             update_state(apnea_active=True, breath_state="apnea")
             add_event("apnea", "No valid breath detected; apnea alarm is active.", "warning")
 
-        interval_ok = last_assist is None or now - last_assist >= cfg["assist_interval_seconds"]
+        last_activity = max(
+            item for item in (last_assist, last_request) if item is not None
+        ) if (last_assist is not None or last_request is not None) else None
+        interval_ok = (
+            servo_state != "pumping"
+            and (last_activity is None or now - last_activity >= cfg["assist_interval_seconds"])
+        )
         if interval_ok:
+            update_state(last_assist_request_time=now)
             add_event("assist", "Apnea assist pump requested.", "warning")
             threading.Thread(target=execute_pump, args=("apnea_assist",), daemon=True).start()
     else:
@@ -880,6 +943,8 @@ def config_route():
     updates = request.get_json(silent=True) or {}
     allowed = {
         "min_breath_activity_pa": float,
+        "humidity_activity_threshold": float,
+        "temperature_activity_threshold": float,
         "assist_mode": str,
         "breath_window_seconds": float,
         "noise_sigma_multiplier": float,
