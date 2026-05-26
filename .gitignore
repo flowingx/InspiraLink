@@ -1,3 +1,21 @@
 __pycache__/
 *.py[cod]
+*.pyo
+src/runtime_logs/
 sleep_assist/runtime_logs/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code / AI assistant files
+AGENTS.md
+plan.md
+previous_codex_session.md
+
+# Old code (replaced by src/)
+sleep_assist/

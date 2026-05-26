@@ -6,21 +6,20 @@
 
 **中文名：灵息**
 
-“灵”代表 AI 的灵动、感知与辅助决策能力；“息”代表呼吸、生命体征与持续看护。灵息希望表达一种更轻巧、更实时、更有温度的呼吸安全守护方式。
+"灵"代表 AI 的灵动、感知与辅助决策能力；"息"代表呼吸、生命体征与持续看护。灵息希望表达一种更轻巧、更实时、更有温度的呼吸安全守护方式。
 
 **英文名：InspiraLink**
 
-`Inspira` 取自 `Inspiration`，兼具“吸气/呼吸”与“灵感”的含义；`Link` 代表连接人与设备、传感器与执行机构、监测与辅助动作。
+`Inspira` 取自 `Inspiration`，兼具"吸气/呼吸"与"灵感"的含义；`Link` 代表连接人与设备、传感器与执行机构、监测与辅助动作。
 
 ## 项目简介
 
-灵息 / InspiraLink 是一个面向课程实践与半实物验证的睡眠呼吸监测和辅助呼吸演示系统。系统以 Raspberry Pi 为核心，通过固定在氧气面罩呼气孔外侧的小型采样腔读取 BMP280/AHT20 的压差、湿度和温度变化，并使用舵机驱动简易球囊完成台架上的辅助泵气演示。
+灵息 / InspiraLink 是一个面向课程实践与半实物验证的多模态智能健康监护系统。系统以 Raspberry Pi 为核心，集成以下功能模块：
 
-当前代码处于 **Phase 1：BMP280 压差 + 舵机 + LED 实测阶段**。MAX30102 还未接入，SpO2/心率相关代码已禁用，不生成假血氧数据，也不会用 SpO2 参与报警或控制。
+- **夜间模式**：通过 BMP280/AHT20 压差+温湿度检测呼吸活动，MAX30102 监测血氧/心率，舵机驱动球囊进行辅助泵气
+- **白天模式**：通过摄像头 + YOLOv8n-pose 姿态估计实现跌倒检测
 
-默认辅助策略是 `apnea_only`：检测到正常呼吸活动时只记录呼吸并清除呼吸暂停报警，不驱动舵机。当前呼吸确认逻辑优先识别 AHT20 湿度上升沿和 BMP280 短时压力脉冲；湿度下降、温度下降、持续负压和环境气流造成的慢漂移不会被当成有效呼吸。系统会学习用户近期呼吸间隔，并在 `apnea_min_seconds` 和 `apnea_max_seconds` 范围内自适应呼吸暂停判定时间；当前 Phase 1 代码把判定时间硬限制在 15 秒以内，避免一次慢呼吸把下一次暂停判断拖到 25 秒。进入呼吸暂停后按 `assist_interval_seconds` 周期触发台架泵气。每次泵气后会在 `pump_artifact_ignore_seconds` 时间内忽略压差触发，并暂停基准更新；随后进入 `post_pump_recovery_seconds` 恢复观察期，使用更敏感的阈值捕捉被轻微唤醒后的弱呼吸。
-
-项目参考 `radar` 示例中的架构思想，采用“后台硬件线程 + Flask API + ECharts 实时仪表盘”的方式，将传感器数据、呼吸判定、舵机状态、报警信息和调试参数集中展示，便于实验记录和答辩演示。
+前端提供白天/黑夜模式切换，一键在两种工作模式间切换。
 
 ## 重要免责声明
 
@@ -29,118 +28,143 @@
 - 本系统及其硬件结构、软件代码均不是医疗器械，未经过 NMPA、FDA 等监管机构认证。
 - 禁止将本项目用于真实临床治疗、生命支持、急救或真实病人的日常护理。
 - 所有自动泵气动作仅用于台架验证，不应连接真实人体气道。
-- 任何涉及呼吸支持或护理的真实行为，必须遵循专业医师指导并使用认证医疗设备。
 
 ## 核心功能
 
-- **多特征呼吸活动检测**：使用 BMP280 读取 Pa 级压差，并可选接入 AHT20 读取湿度/温度变化；湿度/温度只认上升沿，压力只认短脉冲，持续漂移会被抑制。
-- **SpO2 暂不接入**：MAX30102 到货前不显示假 SpO2/心率，不参与报警或控制。
-- **后续血氧闭环评估**：MAX30102 到货后只接入真实 SpO2/心率趋势，用于评估多次泵气后血氧是否恢复；若泵气多次后 SpO2 仍低，应报警并触发轻度唤醒提示，若 SpO2 逐步恢复，则暂停泵气并回到观察状态。
-- **半实物辅助泵气演示**：使用 MG996R/SG90 舵机挤压简易呼吸球囊，默认用于无呼吸超时后的看门狗泵气演示。
-- **安全互锁**：加入冷却时间、手动泵气次数限制、看门狗报警、传感器异常阻断和 LED 报警。
-- **Web 实时仪表盘**：通过 Flask + ECharts 展示压差波形、吸气阈值、呼吸状态、舵机状态、报警和事件日志。
+### 夜间模式（呼吸监测 + 血氧 + 气囊辅助）
+
+- **多特征呼吸活动检测**：BMP280 压差脉冲 + AHT20 湿度上升沿 + 温度上升沿，三者任一满足即确认呼吸活动
+- **自适应呼吸暂停判定**：学习用户呼吸间隔，动态调整暂停判定时间（12-15秒范围内）
+- **血氧闭环评估**：MAX30102 实时读取 SpO2/心率，评估泵气是否有效；若多次泵气后血氧仍低则升级报警
+- **辅助泵气**：MG996R/SG90 舵机挤压球囊，泵气后屏蔽压差干扰并进入恢复观察期
+- **安全互锁**：冷却时间、泵气次数限制、传感器异常阻断、LED 报警
+
+### 白天模式（跌倒检测）
+
+- **YOLOv8n-pose 姿态估计**：通过摄像头实时推理人体骨架
+- **身体角度判定**：计算肩膀中心到髋部中心的角度，接近水平持续多帧则判定跌倒
+- **报警联动**：跌倒时 LED 报警 + 事件日志记录
+
+### Web 实时仪表盘
+
+- Flask + ECharts 实时展示压差波形、状态卡片、SpO2/心率、舵机状态
+- 白天/黑夜模式切换按钮
+- 参数在线调节、手动泵气测试、LED 测试
+- 事件日志持久化到 JSONL 文件
 
 ## 代码结构
 
 ```text
 .
 ├── README.md
-├── plan.md
-└── sleep_assist/
-    ├── app.py
-    ├── README.md
+├── requirements.txt
+├── .gitignore
+├── LICENSE
+└── src/
+    ├── app.py                  # Flask 入口 + 路由 + 启动逻辑
+    ├── config.py               # 系统配置常量
+    ├── state.py                # 共享状态 + 锁 + 事件日志
+    ├── tests.py                # 硬件模块测试函数
+    ├── sensors/
+    │   ├── bmp280.py           # BMP280 气压传感器驱动
+    │   ├── aht20.py            # AHT20 温湿度传感器驱动（smbus2 直连）
+    │   └── max30102.py         # MAX30102 血氧传感器包装
+    ├── detectors/
+    │   ├── breath.py           # 呼吸活动检测 + 暂停控制 + SpO2 评估
+    │   └── fall.py             # YOLOv8n-pose 跌倒检测
+    ├── actuators/
+    │   └── gpio.py             # GPIO 初始化 + LED + 舵机泵气
+    ├── loops/
+    │   ├── night.py            # 夜间模式主循环
+    │   └── day.py              # 白天模式主循环
+    ├── max30102_driver/        # MAX30102 底层 I2C 驱动 + 心率/血氧算法
+    │   ├── max30102.py
+    │   ├── hrcalc.py
+    │   └── heartrate_monitor.py
+    ├── models/
+    │   └── yolov8n-pose2.onnx  # 跌倒检测 ONNX 模型
     └── templates/
-        └── index.html
+        └── index.html          # ECharts 实时仪表盘
 ```
 
 ## 快速运行
 
-请在 Raspberry Pi 的项目目录运行。当前版本默认读取真实 BMP280，并控制真实舵机和 LED；如果 BMP280 读取失败，界面会显示错误，不会生成模拟波形。
+在 Raspberry Pi 项目目录下：
 
 ```bash
 cd /home/xzy/wk/InspiraLink
-python3 sleep_assist/app.py
+pip install -r requirements.txt
+python src/app.py
 ```
 
-浏览器打开：
+浏览器访问：
 
 ```text
-http://127.0.0.1:5000
+http://<树莓派IP>:5000
 ```
 
-如果用手机热点局域网访问树莓派，请在同一网络下打开：
-
-```text
-http://10.176.40.66:5000
-```
-
-## 模块测试命令
-
-每个测试都只操作当前项目代码声明的硬件模块：
+启动参数：
 
 ```bash
-python3 sleep_assist/app.py --test pressure
-python3 sleep_assist/app.py --test environment
-python3 sleep_assist/app.py --test led
-python3 sleep_assist/app.py --test servo
-python3 sleep_assist/app.py --test all
-python3 sleep_assist/app.py --test routes
+python src/app.py                    # 默认夜间模式
+python src/app.py --mode day         # 白天跌倒检测模式
+python src/app.py --host 0.0.0.0 --port 5000
 ```
 
-- `pressure`：连续读取 BMP280，打印气压均值、范围和标准差。
-- `environment`：连续读取 AHT20，打印湿度/温度范围。若模块未连接、地址不通或 CRC 校验失败，会直接报出真实错误。
-- `led`：闪烁 GPIO27 LED。
-- `servo`：让 GPIO18 舵机在复位角和压下角之间动作。
-- `all`：依次测试 BMP280、LED、舵机。
-- `routes`：只测试 Flask 路由，不访问硬件。
+## 模块测试
 
-BMP280/AHT20 均走 I2C。AHT20 使用项目内置的 `smbus2` 直连读写实现，协议参考商家资料中的 `ATH20.c/.h`，不依赖 `adafruit_ahtx0`。若已安装 Pimoroni `bmp280`，通常已经同时安装了 `smbus2`。
-
-## 面罩安装建议
-
-不建议给氧气面罩开孔，也不建议用鼻管。推荐把 BMP280/AHT20 做成外置“小夹子”，夹在面罩原有呼气孔外侧：
-
-- 不堵死呼气孔，只覆盖一个孔或半覆盖一组孔。
-- 传感器位于浅采样腔内，感受呼气孔附近的压差、湿度和温度变化。
-- 使用硅胶圈、海绵圈或 3D 打印夹具贴合面罩外侧，不破坏面罩本体气密性。
-- 杜邦线改为带锁扣线或焊接小转接板，线沿面罩边缘/绑带固定。
+```bash
+python src/app.py --test pressure      # BMP280 气压读数
+python src/app.py --test environment   # AHT20 温湿度读数
+python src/app.py --test spo2          # MAX30102 血氧/心率（15秒）
+python src/app.py --test fall          # 摄像头跌倒检测（15秒）
+python src/app.py --test led           # LED 闪烁
+python src/app.py --test servo         # 舵机动作
+python src/app.py --test routes        # Flask 路由冒烟测试
+python src/app.py --test apnea         # 暂停阈值上限验证
+```
 
 ## 硬件连接
 
-- LED: GPIO27
-- 舵机 PWM: GPIO18
-- I2C SDA: GPIO2
-- I2C SCL: GPIO3
+| 模块 | 接口 | 引脚/地址 |
+|------|------|-----------|
+| LED | GPIO | GPIO27 |
+| 舵机 (MG996R) | PWM | GPIO18 |
+| BMP280 | I2C | 0x76/0x77 |
+| AHT20 | I2C | 0x38 |
+| MAX30102 | I2C | 0x57 |
+| 摄像头 | USB | /dev/video0 |
+| I2C 总线 | SDA/SCL | GPIO2/GPIO3 |
 
-舵机必须使用独立 5V/3A 电源，并与 Raspberry Pi GND 共地。MG996R 高负载时电流较大，严禁直接从 Raspberry Pi 5V 引脚供电。
+舵机必须使用独立 5V/3A 电源，与 Raspberry Pi GND 共地。
 
-## Flask 接口
+## Flask API
 
-- `GET /data`：获取实时系统状态、压差历史和事件日志。
-- `GET /config`：读取阈值、冷却时间、看门狗时间、舵机角度等配置。
-- `POST /config`：更新可调参数。
-- `POST /calibrate`：重新开始 10 秒静息校准。
-- `POST /pump_test`：执行一次受限的手动泵气测试。
-- `GET /logs`：读取事件日志。
+| 路由 | 方法 | 说明 |
+|------|------|------|
+| `/` | GET | 仪表盘页面 |
+| `/data` | GET | 实时系统状态 JSON |
+| `/config` | GET/POST | 读取/更新配置参数 |
+| `/calibrate` | POST | 重新校准压力基准 |
+| `/pump_test` | POST | 手动泵气测试 |
+| `/led_test` | POST | LED 测试 |
+| `/logs` | GET | 事件日志 |
+| `/mode` | GET/POST | 查看/切换白天黑夜模式 |
 
-事件日志会同时写入 `sleep_assist/runtime_logs/events.jsonl`，便于进程停止后复盘最近运行情况。
+## 面罩安装建议
 
-## 实验计划
+传感器做成外置"小夹子"，夹在面罩原有呼气孔外侧：
 
-- 静息噪声测试：记录 5 分钟空置压力数据，评估误触发率。
-- 模拟呼吸测试：将传感器夹具固定在面罩呼气孔外侧，观察压差、湿度和温度活动幅度。
-- 阈值对比测试：比较压差窗口幅度、湿度活动、温度活动和组合阈值。
-- 舵机台架测试：记录空载、挤压球囊、堵转、电源温升和动作延迟。
-- 看门狗测试：停止模拟呼吸超过 15 秒，验证报警和一次辅助泵气演示。
-- 前端演示测试：确认压差波形、状态卡片、参数更新和日志实时刷新。
+- 不堵死呼气孔，不破坏面罩气密性
+- 传感器位于浅采样腔内，感受呼气孔附近的压差和湿度变化
+- 线沿面罩边缘/绑带固定，使用带锁扣线或焊接小转接板
 
 ## 参考资料
 
-- FDA Respiratory Devices: https://www.fda.gov/medical-devices/products-and-medical-procedures/respiratory-devices
-- FDA Ventilators and Ventilator Accessories: https://www.fda.gov/medical-devices/coronavirus-covid-19-and-medical-devices/ventilators-and-ventilator-accessories-covid-19
 - Raspberry Pi Documentation: https://www.raspberrypi.com/documentation/computers/raspberry-pi.html
 - MAX30102 Product Page: https://www.analog.com/en/products/max30102.html
 - Bosch BMP280 Datasheet: https://www.bosch-sensortec.com/media/boschsensortec/downloads/datasheets/bst-bmp280-ds001.pdf
+- YOLOv8 Pose: https://docs.ultralytics.com/tasks/pose/
 
 ## License
 

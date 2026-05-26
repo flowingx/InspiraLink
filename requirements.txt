@@ -1,0 +1,9 @@
+flask>=3.0
+smbus2>=0.4
+numpy>=1.24
+RPi.GPIO>=0.7
+gpiozero>=2.0
+pigpio>=1.78
+bmp280>=1.0
+onnxruntime>=1.15
+opencv-python>=4.8
