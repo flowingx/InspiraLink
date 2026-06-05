@@ -45,6 +45,8 @@ class FallDetector:
         self._frame_count = 0
         self._is_fall = False
         self._last_angle = None
+        self._frame_lock = threading.Lock()
+        self._last_jpeg = None
         self._stopped = False
         self._thread = None
 
@@ -72,6 +74,10 @@ class FallDetector:
     def last_angle(self):
         return self._last_angle
 
+    def get_jpeg_frame(self):
+        with self._frame_lock:
+            return self._last_jpeg
+
     def _loop(self):
         cv2 = self._cv2
         np = self._np
@@ -80,6 +86,11 @@ class FallDetector:
             if not ret:
                 time.sleep(0.05)
                 continue
+
+            ok, jpg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+            if ok:
+                with self._frame_lock:
+                    self._last_jpeg = jpg.tobytes()
 
             self._frame_count += 1
             if self._frame_count % self._inference_interval != 0:

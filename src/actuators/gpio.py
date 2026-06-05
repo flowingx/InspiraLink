@@ -1,4 +1,5 @@
 import threading
+import subprocess
 import time
 
 from ..config import GPIO_PINS
@@ -18,11 +19,51 @@ from ..state import (
 import src.state as _st
 
 
+def servo_value_from_angle(angle):
+    return max(-1.0, min(1.0, (float(angle) / 90.0) - 1.0))
+
+
+def clamp_servo_value(value):
+    return max(-1.0, min(1.0, float(value)))
+
+
+def set_servo_angle(servo, angle):
+    servo.value = servo_value_from_angle(angle)
+
+
+def set_servo_value(servo, value):
+    servo.value = clamp_servo_value(value)
+
+
+def release_servo():
+    if _st.servo_device is not None:
+        try:
+            _st.servo_device.value = None
+        except Exception:
+            pass
+    try:
+        subprocess.run(
+            ["pigs", "s", str(GPIO_PINS["servo"]), "0"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=1.0,
+            check=False,
+        )
+    except Exception:
+        pass
+
+
 def init_gpio():
     from gpiozero import AngularServo, Device, LED
-    from gpiozero.pins.pigpio import PiGPIOFactory
 
-    Device.pin_factory = PiGPIOFactory()
+    try:
+        from gpiozero.pins.pigpio import PiGPIOFactory
+
+        Device.pin_factory = PiGPIOFactory()
+    except Exception:
+        from gpiozero.pins.lgpio import LGPIOFactory
+
+        Device.pin_factory = LGPIOFactory()
 
     if _st.led_device is not None:
         try:
@@ -32,19 +73,27 @@ def init_gpio():
         _st.led_device = None
     if _st.servo_device is not None:
         try:
+            release_servo()
             _st.servo_device.close()
         except Exception:
             pass
         _st.servo_device = None
 
     led = LED(GPIO_PINS["led"])
-    servo = AngularServo(
-        GPIO_PINS["servo"],
-        min_angle=0,
-        max_angle=180,
-        min_pulse_width=0.0005,
-        max_pulse_width=0.0025,
-    )
+    servo_kwargs = {
+        "min_angle": 0,
+        "max_angle": 180,
+        "min_pulse_width": 0.0005,
+        "max_pulse_width": 0.0025,
+    }
+    try:
+        servo = AngularServo(GPIO_PINS["servo"], initial_angle=None, **servo_kwargs)
+    except TypeError:
+        servo = AngularServo(GPIO_PINS["servo"], **servo_kwargs)
+        try:
+            servo.value = None
+        except Exception:
+            pass
     return led, servo
 
 
@@ -80,9 +129,13 @@ def execute_pump(reason="manual"):
         try:
             if _st.servo_device is None:
                 raise RuntimeError("servo is not initialized")
-            _st.servo_device.angle = cfg["servo_press_angle"]
-            time.sleep(cfg["pump_hold_seconds"])
-            _st.servo_device.angle = cfg["servo_rest_angle"]
+            try:
+                set_servo_value(_st.servo_device, cfg["servo_press_value"])
+                time.sleep(cfg["pump_hold_seconds"])
+                set_servo_value(_st.servo_device, cfg["servo_rest_value"])
+                time.sleep(cfg["servo_rest_seconds"])
+            finally:
+                release_servo()
             update_state(
                 servo_state="idle",
                 last_assist_time=now,
@@ -92,6 +145,7 @@ def execute_pump(reason="manual"):
             add_event("pump", "Pump action completed.")
             return True, "pump completed"
         except Exception as exc:
+            release_servo()
             add_alarm("servo_error")
             update_state(servo_state="error")
             set_led(True)

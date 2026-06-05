@@ -1,4 +1,6 @@
 import argparse
+import atexit
+import signal
 import sys
 import threading
 import time
@@ -12,7 +14,7 @@ _PROJECT_DIR = _SRC_DIR.parent
 if str(_PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(_PROJECT_DIR))
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request
 
 from src.config import GPIO_PINS, clamp_config_values
 from src.state import (
@@ -28,7 +30,7 @@ from src.state import (
     system_state,
     update_state,
 )
-from src.actuators.gpio import execute_pump, set_led
+from src.actuators.gpio import execute_pump, release_servo, set_led
 from src.detectors.breath import reset_calibration
 from src.loops.night import monitor_loop
 from src.loops.day import day_monitor_loop
@@ -36,9 +38,28 @@ from src.loops.day import day_monitor_loop
 import src.state as _st
 
 app = Flask(
-    __name__,
+    "src",
+    root_path=str(_SRC_DIR),
     template_folder=str(_SRC_DIR / "templates"),
+    instance_path=str(_PROJECT_DIR / "instance"),
 )
+
+
+def release_outputs():
+    release_servo()
+    set_led(False)
+
+
+def handle_shutdown(signum, frame):
+    stop_event.set()
+    release_outputs()
+    raise SystemExit(0)
+
+
+atexit.register(release_outputs)
+if threading.current_thread() is threading.main_thread():
+    signal.signal(signal.SIGINT, handle_shutdown)
+    signal.signal(signal.SIGTERM, handle_shutdown)
 
 
 def start_background_threads():
@@ -79,6 +100,7 @@ def switch_mode(new_mode):
         _st.led_device = None
     if _st.servo_device is not None:
         try:
+            release_servo()
             _st.servo_device.close()
         except Exception:
             pass
@@ -110,6 +132,19 @@ def data():
     return jsonify(snapshot)
 
 
+@app.route("/camera_feed")
+def camera_feed():
+    def generate():
+        while True:
+            detector = _st.fall_detector_instance
+            frame = detector.get_jpeg_frame() if detector is not None else None
+            if frame is not None:
+                yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
+            time.sleep(0.1)
+
+    return Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
+
+
 @app.route("/config", methods=["GET", "POST"])
 def config_route():
     if request.method == "GET":
@@ -134,9 +169,13 @@ def config_route():
         "post_pump_threshold_factor": float,
         "servo_rest_angle": int,
         "servo_press_angle": int,
+        "servo_rest_value": float,
+        "servo_press_value": float,
+        "servo_rest_seconds": float,
         "pump_hold_seconds": float,
         "pump_cooldown_seconds": float,
         "spo2_alarm_threshold": float,
+        "spo2_recovery_hold_seconds": float,
         "spo2_pump_max_count": int,
         "fall_angle_threshold": float,
         "fall_detect_frames": int,
@@ -273,4 +312,3 @@ if __name__ == "__main__":
             config["system_mode"] = args.mode
         start_background_threads()
         app.run(host=args.host, port=args.port, debug=False)
-

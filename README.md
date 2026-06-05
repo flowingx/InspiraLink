@@ -16,7 +16,7 @@
 
 灵息 / InspiraLink 是一个面向课程实践与半实物验证的多模态智能健康监护系统。系统以 Raspberry Pi 为核心，集成以下功能模块：
 
-- **夜间模式**：通过 BMP280/AHT20 压差+温湿度检测呼吸活动，MAX30102 监测血氧/心率，舵机驱动球囊进行辅助泵气
+- **夜间模式**：通过 BMP280/AHT20 压差+温湿度检测呼吸活动，MAX30102 监测血氧/心率趋势，舵机驱动球囊进行台架辅助泵气
 - **白天模式**：通过摄像头 + YOLOv8n-pose 姿态估计实现跌倒检测
 
 前端提供白天/黑夜模式切换，一键在两种工作模式间切换。
@@ -35,19 +35,20 @@
 
 - **多特征呼吸活动检测**：BMP280 压差脉冲 + AHT20 湿度上升沿 + 温度上升沿，三者任一满足即确认呼吸活动
 - **自适应呼吸暂停判定**：学习用户呼吸间隔，动态调整暂停判定时间（12-15秒范围内）
-- **血氧闭环评估**：MAX30102 实时读取 SpO2/心率，评估泵气是否有效；若多次泵气后血氧仍低则升级报警
+- **血氧趋势保护**：MAX30102 读数不稳定时不以低血氧触发泵气；SpO2 连续恢复到阈值以上 3 秒后暂停辅助泵气
 - **辅助泵气**：MG996R/SG90 舵机挤压球囊，泵气后屏蔽压差干扰并进入恢复观察期
-- **安全互锁**：冷却时间、泵气次数限制、传感器异常阻断、LED 报警
+- **安全互锁**：冷却时间、泵气次数限制、传感器异常阻断、退出时自动释放舵机 PWM、LED 报警
 
 ### 白天模式（跌倒检测）
 
 - **YOLOv8n-pose 姿态估计**：通过摄像头实时推理人体骨架
 - **身体角度判定**：计算肩膀中心到髋部中心的角度，接近水平持续多帧则判定跌倒
+- **实时画面展示**：白天模式仪表盘中间区域显示摄像头 MJPEG 画面
 - **报警联动**：跌倒时 LED 报警 + 事件日志记录
 
 ### Web 实时仪表盘
 
-- Flask + ECharts 实时展示压差波形、状态卡片、SpO2/心率、舵机状态
+- Flask + ECharts 实时展示压差波形、状态卡片、SpO2/心率、舵机状态和白天摄像头画面
 - 白天/黑夜模式切换按钮
 - 参数在线调节、手动泵气测试、LED 测试
 - 事件日志持久化到 JSONL 文件
@@ -150,6 +151,7 @@ python src/app.py --test apnea         # 暂停阈值上限验证
 | `/led_test` | POST | LED 测试 |
 | `/logs` | GET | 事件日志 |
 | `/mode` | GET/POST | 查看/切换白天黑夜模式 |
+| `/camera_feed` | GET | 白天模式摄像头 MJPEG 画面流 |
 
 ## 面罩安装建议
 
@@ -164,7 +166,7 @@ python src/app.py --test apnea         # 暂停阈值上限验证
 - Raspberry Pi Documentation: https://www.raspberrypi.com/documentation/computers/raspberry-pi.html
 - MAX30102 Product Page: https://www.analog.com/en/products/max30102.html
 - Bosch BMP280 Datasheet: https://www.bosch-sensortec.com/media/boschsensortec/downloads/datasheets/bst-bmp280-ds001.pdf
-- YOLOv8 Pose: https://docs.ultralytics.com/tasks/pose/
+- YOLOv8: https://docs.ultralytics.com/models/yolov8/
 
 ## License
 

@@ -22,7 +22,7 @@ from ..state import (
     update_state,
 )
 from ..sensors import HardwarePressureReader, OptionalAHT20Reader, OptionalMAX30102Reader
-from ..actuators.gpio import init_gpio, set_led
+from ..actuators.gpio import init_gpio, release_servo, set_led
 from ..detectors.breath import (
     maybe_detect_breath_activity,
     update_apnea_control,
@@ -38,10 +38,10 @@ def init_hardware():
     gpio_status_servo = "not initialized"
     try:
         _st.led_device, _st.servo_device = init_gpio()
-        _st.servo_device.angle = cfg["servo_rest_angle"]
+        release_servo()
         gpio_status_led = f"GPIO{GPIO_PINS['led']} LED"
         gpio_status_servo = f"GPIO{GPIO_PINS['servo']} AngularServo"
-        add_event("hardware", "GPIO initialized (LED + Servo).")
+        add_event("hardware", "GPIO initialized (LED + Servo released).")
     except Exception as exc:
         _st.led_device = None
         _st.servo_device = None

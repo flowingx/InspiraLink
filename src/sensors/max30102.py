@@ -19,16 +19,22 @@ class OptionalMAX30102Reader:
 
     @property
     def bpm(self):
+        if self.error:
+            return 0
         return self._hrm.bpm if self._started else 0
 
     @property
     def spo2(self):
-        if not self._started:
+        if not self._started or self.error:
             return None
         spos = getattr(self._hrm, "spos", [])
         if spos:
             return spos[-1]
         return None
+
+    @property
+    def error(self):
+        return getattr(self._hrm, "error", None) if self._started else None
 
     def stop(self):
         if self._started:

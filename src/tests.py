@@ -75,20 +75,27 @@ def test_led(cycles=3, on_seconds=0.5):
         led.off()
 
 
-def test_servo(rest_angle=30, press_angle=105, hold_seconds=0.6, cycles=3):
+def test_servo(rest_value=-1.0, press_value=1.0, hold_seconds=1.5, rest_seconds=1.0, cycles=3):
     _, servo = init_gpio()
+
+    def to_angle(v):
+        return round((v + 1) / 2 * 180, 1)
+
     try:
-        servo.angle = rest_angle
+        servo.value = rest_value
         time.sleep(0.5)
         for idx in range(cycles):
-            print(f"servo press {press_angle} deg ({idx + 1}/{cycles})")
-            servo.angle = press_angle
+            print(f"servo press value={press_value} ({to_angle(press_value)}°) ({idx + 1}/{cycles})")
+            servo.value = press_value
             time.sleep(hold_seconds)
-            print(f"servo rest {rest_angle} deg ({idx + 1}/{cycles})")
-            servo.angle = rest_angle
-            time.sleep(1.0)
+            print(f"servo rest  value={rest_value} ({to_angle(rest_value)}°) ({idx + 1}/{cycles})")
+            servo.value = rest_value
+            time.sleep(rest_seconds)
     finally:
-        servo.angle = rest_angle
+        servo.value = None
+        time.sleep(1)
+        # time.sleep(0.5)
+        # servo.detach()
 
 
 def test_routes():
@@ -112,6 +119,10 @@ def test_spo2(duration=15):
     print(f"Reading for {duration} seconds (keep finger on sensor)...")
     start = time.time()
     while time.time() - start < duration:
+        reader_error = getattr(reader, "error", None)
+        if reader_error:
+            print(f"MAX30102 stopped: {reader_error}")
+            break
         bpm = reader.bpm
         spo2 = reader.spo2
         print(f"  BPM={bpm:.1f}  SpO2={spo2:.1f}" if spo2 else f"  BPM={bpm:.1f}  SpO2=--")
@@ -169,4 +180,3 @@ def test_apnea_bounds():
             indent=2,
         )
     )
-

@@ -22,10 +22,14 @@ DEFAULT_CONFIG = {
     "post_pump_threshold_factor": 0.65,
     "servo_rest_angle": 30,
     "servo_press_angle": 105,
-    "pump_hold_seconds": 0.55,
+    "servo_rest_value": -1.0,
+    "servo_press_value": 1.0,
+    "servo_rest_seconds": 1.0,
+    "pump_hold_seconds": 1.5,
     "pump_cooldown_seconds": 3.0,
     "pump_test_limit": 20,
     "spo2_alarm_threshold": 90,
+    "spo2_recovery_hold_seconds": 3.0,
     "spo2_pump_max_count": 5,
     "fall_angle_threshold": 45,
     "fall_detect_frames": 5,
@@ -61,4 +65,20 @@ def clamp_config_values(cfg):
     cfg["adaptive_apnea_factor"] = max(
         1.2,
         min(float(cfg.get("adaptive_apnea_factor", DEFAULT_CONFIG["adaptive_apnea_factor"])), 2.0),
+    )
+    cfg["servo_rest_value"] = max(
+        -1.0,
+        min(float(cfg.get("servo_rest_value", DEFAULT_CONFIG["servo_rest_value"])), 1.0),
+    )
+    cfg["servo_press_value"] = max(
+        -1.0,
+        min(float(cfg.get("servo_press_value", DEFAULT_CONFIG["servo_press_value"])), 1.0),
+    )
+    cfg["servo_rest_seconds"] = max(
+        0.0,
+        min(float(cfg.get("servo_rest_seconds", DEFAULT_CONFIG["servo_rest_seconds"])), 5.0),
+    )
+    cfg["spo2_recovery_hold_seconds"] = max(
+        0.0,
+        min(float(cfg.get("spo2_recovery_hold_seconds", DEFAULT_CONFIG["spo2_recovery_hold_seconds"])), 30.0),
     )

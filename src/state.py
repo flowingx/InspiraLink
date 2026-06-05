@@ -50,6 +50,8 @@ system_state = {
     "heart_rate": None,
     "spo2_status": "not initialized",
     "spo2_trend": "unknown",
+    "spo2_recovery_since": None,
+    "spo2_recovered_stable": False,
     "apnea_pump_count": 0,
     "fall_detected": False,
     "fall_count": 0,

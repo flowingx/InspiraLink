@@ -59,6 +59,8 @@ def reset_calibration():
         system_state["last_assist_request_time"] = None
         system_state["ignore_pressure_until"] = 0.0
         system_state["recovery_until"] = 0.0
+        system_state["spo2_recovery_since"] = None
+        system_state["spo2_recovered_stable"] = False
     clear_alarm("apnea_watchdog")
     add_event("calibration", "Calibration restarted; keep the pressure tube still.")
 
@@ -87,6 +89,16 @@ def current_adaptive_apnea_seconds(cfg):
     median_interval = statistics.median(intervals)
     adaptive = median_interval * float(cfg["adaptive_apnea_factor"])
     return min(apnea_max_seconds, max(apnea_min_seconds, adaptive))
+
+
+def spo2_blocks_assist(cfg):
+    with state_lock:
+        spo2_value = system_state["spo2"]
+        spo2_recovered_stable = system_state["spo2_recovered_stable"]
+    return (
+        spo2_value is not None
+        and (spo2_value < cfg["spo2_alarm_threshold"] or spo2_recovered_stable)
+    )
 
 
 def maybe_detect_breath_activity(delta_pa, now, cfg):
@@ -213,7 +225,14 @@ def maybe_detect_breath_activity(delta_pa, now, cfg):
             f"Breath activity detected ({direction}, {', '.join(features)}); apnea alarm cleared.",
         )
         if cfg["assist_mode"] == "sync":
-            threading.Thread(target=execute_pump, args=("breath_sync",), daemon=True).start()
+            if spo2_blocks_assist(cfg):
+                add_event(
+                    "assist",
+                    "Sync pump suppressed: SpO2 is low/unreliable or has recovered stably.",
+                    "warning",
+                )
+            else:
+                threading.Thread(target=execute_pump, args=("breath_sync",), daemon=True).start()
     elif (breath_state == "breath_activity" or activity_latched) and recovered:
         set_led(False)
         update_state(breath_state="monitoring", activity_latched=False)
@@ -264,8 +283,13 @@ def update_apnea_control(now, cfg):
         if interval_ok:
             with state_lock:
                 pump_count = system_state["apnea_pump_count"]
-            if "spo2_pump_ineffective" in system_state.get("alarms", []):
-                add_event("assist", "Pump suppressed: SpO2 pump ineffective alarm active.", "warning")
+            if spo2_blocks_assist(cfg):
+                update_state(last_assist_request_time=now)
+                add_event(
+                    "assist",
+                    "Pump suppressed: SpO2 is low/unreliable or has recovered stably.",
+                    "warning",
+                )
             else:
                 update_state(last_assist_request_time=now, apnea_pump_count=pump_count + 1)
                 add_event("assist", "Apnea assist pump requested.", "warning")
@@ -280,6 +304,24 @@ def update_spo2_state(cfg):
     if _st.spo2_monitor is None:
         return
 
+    monitor_error = getattr(_st.spo2_monitor, "error", None)
+    if monitor_error:
+        try:
+            _st.spo2_monitor.stop()
+        except Exception:
+            pass
+        _st.spo2_monitor = None
+        update_state(
+            spo2=None,
+            heart_rate=None,
+            spo2_status=f"MAX30102 unavailable: {monitor_error}",
+            spo2_trend="unknown",
+            spo2_recovery_since=None,
+            spo2_recovered_stable=False,
+        )
+        add_event("hardware", f"MAX30102 unavailable: {monitor_error}", "warning")
+        return
+
     current_bpm = _st.spo2_monitor.bpm
     current_spo2 = _st.spo2_monitor.spo2
 
@@ -290,26 +332,36 @@ def update_spo2_state(cfg):
         system_state["heart_rate"] = hr_value
         system_state["spo2"] = spo2_value
 
-    if spo2_value is not None and spo2_value < cfg["spo2_alarm_threshold"]:
+    now = time.time()
+
+    if spo2_value is None:
+        update_state(spo2_trend="unknown", spo2_recovery_since=None, spo2_recovered_stable=False)
+        return
+
+    if spo2_value < cfg["spo2_alarm_threshold"]:
         add_alarm("spo2_low")
+        clear_alarm("spo2_pump_ineffective")
+        update_state(spo2_trend="low_untrusted", spo2_recovery_since=None, spo2_recovered_stable=False)
     else:
         clear_alarm("spo2_low")
-
-    with state_lock:
-        apnea_active = system_state["apnea_active"]
-        pump_count = system_state["apnea_pump_count"]
-
-    if apnea_active and spo2_value is not None:
-        if spo2_value >= cfg["spo2_alarm_threshold"]:
-            update_state(spo2_trend="recovering", apnea_pump_count=0)
-            add_event("spo2", f"SpO2 recovered to {spo2_value}%; pausing assist.", "info")
-        elif pump_count >= cfg["spo2_pump_max_count"]:
-            add_alarm("spo2_pump_ineffective")
-            update_state(spo2_trend="declining")
-            add_event(
-                "spo2",
-                f"SpO2 still low ({spo2_value}%) after {pump_count} pumps; escalating alarm.",
-                "error",
+        clear_alarm("spo2_pump_ineffective")
+        with state_lock:
+            recovery_since = system_state["spo2_recovery_since"]
+            was_stable = system_state["spo2_recovered_stable"]
+        if recovery_since is None:
+            update_state(
+                spo2_trend="recovering",
+                spo2_recovery_since=now,
+                spo2_recovered_stable=False,
             )
+        elif now - recovery_since >= cfg["spo2_recovery_hold_seconds"]:
+            update_state(spo2_trend="recovered", spo2_recovered_stable=True, apnea_pump_count=0)
+            if not was_stable:
+                add_event(
+                    "spo2",
+                    f"SpO2 stayed above {cfg['spo2_alarm_threshold']}% for "
+                    f"{cfg['spo2_recovery_hold_seconds']}s; pausing assist pump.",
+                    "info",
+                )
         else:
-            update_state(spo2_trend="low")
+            update_state(spo2_trend="recovering", spo2_recovered_stable=False)
